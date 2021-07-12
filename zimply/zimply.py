@@ -383,8 +383,7 @@ class DirectoryBlock(Block):
         field_values["url"] = read_zero_terminated(file_resource, self._encoding)
         # followed by the title, which is again a zero terminated field
         field_values["title"] = read_zero_terminated(file_resource, self._encoding)
-        field_values["namespace"] = field_values["namespace"].decode(
-            encoding=self._encoding, errors="ignore")
+        field_values["namespace"] = field_values["namespace"].decode(encoding=self._encoding, errors="ignore")
         return field_values
 
 
@@ -593,14 +592,16 @@ class ZIMFile:
     def get_article_by_url(self, namespace, url, follow_redirect=True):
         entry, idx = self._get_entry_by_url(namespace, url)  # get the entry
         if idx:  # we found an index and return the article at that index
-            return self._get_article_by_index(
-                idx, follow_redirect=follow_redirect)
+            return self._get_article_by_index(idx, follow_redirect=follow_redirect)
 
     def get_xapian_offset(self):
         # identify whether a full-text Xapian index is available
         _, xapian_idx = self._get_entry_by_url("X", "fulltext/xapian")
+        full = True
         if not xapian_idx:  # if we did not get a response try a title index instead as fallback option
             _, xapian_idx = self._get_entry_by_url("X", "title/xapian")
+            full = False
+        logging.info("no Xapian index found" if not xapian_idx else "found Xapian index (full-text: " + str(full) + ")")
         # return the offset if we found either the full-text or Title index, or return None otherwise
         return self._get_article_by_index(xapian_idx, follow_redirect=True, return_offset=True) if xapian_idx else None
 
@@ -737,6 +738,8 @@ class BM25:
 class ZIMRequestHandler:
     # provide for a class variable to store the ZIM file object
     zim = None
+    # the (main) language of the ZIM file contents
+    language = "en"
     # provide a class variable to store the index file
     reverse_index = None
     # provide another class variable to store the schema for the index file
@@ -856,41 +859,79 @@ class ZIMRequestHandler:
                 # use the keywords to search the index
                 # q = qp.parse(" ".join(keywords))
 
-                cursor = ZIMRequestHandler.reverse_index.cursor()
-                search_for = "* ".join(keywords) + "*"
-                cursor.execute("SELECT rowid FROM papers WHERE title MATCH ?",
-                               [search_for])
+                weighted_result = []
 
-                results = cursor.fetchall()
-                if not results:
-                    body = "no results found for: " + " <i>" + " ".join(
-                        keywords) + "</i>"  # ... let the user know
-                else:
+                if self.xapian_index:
+                    # create the query parser
+                    parser = xapian.QueryParser()
+                    parser.set_stemmer(xapian.Stem(self.language))
+                    # NOTE: the STEM_SOME strategy is not working as expected
+                    parser.set_stemming_strategy(xapian.QueryParser.STEM_ALL)
+                    parser.set_default_op(xapian.Query.OP_AND)
+
+                    query = parser.parse_query(" ".join(keywords))
+
+                    # create the enquirer that will do the search
+                    enquire = xapian.Enquire(self.xapian_index)
+                    enquire.set_query(query)
+                    matches = enquire.get_mset(0, self.xapian_index.get_doccount())  # TODO: can be used for pagination
+
                     entries = []
-                    redirects = []
-                    for row in results:  # ... iterate over all the results
-                        # read the directory entry by index (rather than URL)
-                        entry = self.zim.read_directory_entry_by_index(row[0])
-                        # add the full url to the entry
-                        if entry.get("redirectIndex"):
-                            redirects.append(entry)
+                    scores = []
+                    for match in matches:  # ... iterate over all the results
+                        location = match.document.get_data().decode(encoding=self.encoding)  # the document is the URL
+                        splits = location.split("/")
+                        if len(splits) == 0:
+                            continue  # nothing to do here
+                        elif len(splits) == 1:
+                            namespace = "A"  # assume a basic article
+                            url = splits[1]
                         else:
-                            entries.append(entry)
-                    indexes = set(entry["index"] for entry in entries)
-                    print(indexes)
-                    redirects = [entry for entry in redirects if
-                                 entry["redirectIndex"] not in indexes]
+                            namespace = splits[0]
+                            url = "/".join(splits[1:])
 
-                    entries = list(chain(entries, redirects))
-                    titles = [entry["title"] for entry in entries]
-                    scores = self.bm25.calculate_scores(keywords, titles)
-                    weighted_result = sorted(zip(scores, entries),
-                                             reverse=True, key=lambda x: x[0])
+                        # beware there be magic numbers - taken from the C++ code of libzim
+                        title = match.document.get_value(0).decode(encoding=self.encoding)
+                        docid = match.document.get_value(1).decode(encoding=self.encoding)
 
+                        # do some duck typing to make each entry behave like a DirectoryBlock
+                        entries.append({"index": docid, "namespace": namespace, "url": url, "title": title})
+                        scores.append(match.weight)
+                    weighted_result = sorted(zip(scores, entries), reverse=True, key=lambda x: x[0])
+                elif self.reverse_index:
+                    cursor = ZIMRequestHandler.reverse_index.cursor()
+                    search_for = "* ".join(keywords) + "*"
+                    cursor.execute("SELECT rowid FROM papers WHERE title MATCH ?", (search_for,))
+
+                    results = cursor.fetchall()
+                    if results:
+                        entries = []
+                        redirects = []
+                        for row in results:  # ... iterate over all the results
+                            # read the directory entry by index (rather than URL)
+                            entry = self.zim.read_directory_entry_by_index(row[0])
+                            # add the full url to the entry
+                            if entry.get("redirectIndex"):
+                                redirects.append(entry)
+                            else:
+                                entries.append(entry)
+                        indexes = set(entry["index"] for entry in entries)
+                        logging.info("indexes found: " + str(indexes))
+                        redirects = [entry for entry in redirects if entry["redirectIndex"] not in indexes]
+
+                        entries = list(chain(entries, redirects))
+                        titles = [entry["title"] for entry in entries]
+                        scores = self.bm25.calculate_scores(keywords, titles)
+                        weighted_result = sorted(zip(scores, entries), reverse=True, key=lambda x: x[0])
+
+                # present the results irrespective of the index we used
+                if not weighted_result:
+                    # ... let the user know there are no results
+                    body = "no results found for: " + " <i>" + " ".join(keywords) + "</i>"
+                else:
                     for weight, entry in weighted_result:
-                        print(weight, entry)
-                        body += "<a href=\"{}\">{}</a><br />".format(
-                            entry["url"], entry["title"])
+                        logging.info(str(weight) + ": " + str(entry))
+                        body += "<a href=\"{}\">{}</a><br />".format(entry["url"], entry["title"])
 
         else:  # if we did not achieve success
             response.status = falcon.HTTP_404
@@ -909,34 +950,29 @@ class ZIMRequestHandler:
 
 
 class ZIMServer:
-    def __init__(self, filename, index_file="",
-                 template=pkg_resources.resource_filename(
-                     __name__, "template.html"),
+    def __init__(self, filename, index_file="", template=pkg_resources.resource_filename(__name__, "template.html"),
                  ip_address="", port=9454, encoding="utf-8"):
         # create the object to access the ZIM file
         self._zim_file = ZIMFile(filename, encoding)
         # get the language of the ZIM file and convert it to ISO639_1 or
         # default to "en" if unsupported
         default_iso = to_bytes("eng", encoding=encoding)
-        iso639 = self._zim_file.metadata().get("language", default_iso) \
-            .decode(encoding=encoding, errors="ignore")
+        iso639 = self._zim_file.metadata().get("language", default_iso).decode(encoding=encoding, errors="ignore")
         lang = iso639_3to1.get(iso639, "en")
         logging.info("A ZIM file in the language " + str(lang) +
-                     " (ISO639-1) was found, " +
-                     "containing " + str(len(self._zim_file)) + " articles.")
+                     " (ISO639-1) was found, containing " + str(len(self._zim_file)) + " articles.")
         if not index_file:
             index_file = os.path.join(os.path.dirname(filename), "index.idx")
-        logging.info("The index file is determined to be located at " +
-                     str(index_file) + ".")
+        logging.info("The index file is determined to be located at " + str(index_file) + ".")
 
         # set this object to a class variable of ZIMRequestHandler
         ZIMRequestHandler.zim = self._zim_file
+        ZIMRequestHandler.language = lang
         # set the index schema to a class variable of ZIMRequestHandler
         # ZIMRequestHandler.schema = self._schema
         has_index = False
         if FOUND_XAPIAN:
             xapian_offset = self._zim_file.get_xapian_offset()
-            print(xapian_offset)
             if xapian_offset is not None:
                 xapian_file = open(filename)
                 xapian_file.seek(xapian_offset)
@@ -962,10 +998,8 @@ class ZIMServer:
 
     def _bootstrap_index(self, index_file):
         if not os.path.exists(index_file):  # check whether the index exists
-            logging.info("No index was found at " + str(index_file) +
-                         ", so now creating the index.")
-            print("Please wait as the index is created, "
-                  "this can take quite some time! - " + time.strftime("%X %x"))
+            logging.info("No index was found at " + str(index_file) + ", so now creating the index.")
+            print("Please wait as the index is created, this can take quite some time! - " + time.strftime("%X %x"))
 
             db = sqlite3.connect(index_file)
             cursor = db.cursor()
@@ -973,15 +1007,12 @@ class ZIMServer:
             cursor.execute("PRAGMA CACHE_SIZE = -65536")
             # create a content-less virtual table using full-text search (FTS5)
             # and the porter tokenizer
-            cursor.execute("CREATE VIRTUAL TABLE papers "
-                           "USING fts5(content='', title, tokenize=porter);")
+            cursor.execute("CREATE VIRTUAL TABLE papers USING fts5(content='', title, tokenize=porter);")
             # get an iterator to access all the articles
             articles = iter(self._zim_file)
 
             for url, title, idx in articles:  # retrieve articles one by one
-                cursor.execute(
-                    "INSERT INTO papers(rowid, title) VALUES (?, ?)",
-                    (idx, title))  # and add them
+                cursor.execute("INSERT INTO papers(rowid, title) VALUES (?, ?)", (idx, title))  # and add them
             # once all articles are added, commit the changes to the database
             db.commit()
 
