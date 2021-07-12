@@ -901,7 +901,7 @@ class ZIMRequestHandler:
                 elif self.reverse_index:
                     cursor = ZIMRequestHandler.reverse_index.cursor()
                     search_for = "* ".join(keywords) + "*"
-                    cursor.execute("SELECT rowid FROM papers WHERE title MATCH ?", (search_for,))
+                    cursor.execute("SELECT rowid FROM docs WHERE title MATCH ?", (search_for,))
 
                     results = cursor.fetchall()
                     if results:
@@ -1001,25 +1001,58 @@ class ZIMServer:
             logging.info("No index was found at " + str(index_file) + ", so now creating the index.")
             print("Please wait as the index is created, this can take quite some time! - " + time.strftime("%X %x"))
 
-            db = sqlite3.connect(index_file)
-            cursor = db.cursor()
-            # limit memory usage to 64MB
-            cursor.execute("PRAGMA CACHE_SIZE = -65536")
-            # create a content-less virtual table using full-text search (FTS5)
-            # and the porter tokenizer
-            cursor.execute("CREATE VIRTUAL TABLE papers USING fts5(content='', title, tokenize=porter);")
-            # get an iterator to access all the articles
-            articles = iter(self._zim_file)
+            level = self._highest_fts_level()
+            if level:
+                logging.info("Support found for FTS" + str(level) + ".")
+                db = sqlite3.connect(index_file)
+                cursor = db.cursor()
+                # limit memory usage to 64MB
+                cursor.execute("PRAGMA CACHE_SIZE = -65536")
 
-            for url, title, idx in articles:  # retrieve articles one by one
-                cursor.execute("INSERT INTO papers(rowid, title) VALUES (?, ?)", (idx, title))  # and add them
-            # once all articles are added, commit the changes to the database
-            db.commit()
+                # create a content-less virtual table using full-text search (FTS) and the porter tokenizer
+                fts = "fts" + str(level)
+                cursor.execute("CREATE VIRTUAL TABLE docs USING " + str(fts) + "(content='', title, tokenize=porter);")
+                # get an iterator to access all the articles
+                articles = iter(self._zim_file)
 
-            print("Index created, continuing - " + time.strftime("%X %x"))
-            db.close()
+                for url, title, idx in articles:  # retrieve articles one by one
+                    cursor.execute("INSERT INTO docs(rowid, title) VALUES (?, ?)", (idx, title))  # and add them
+                # once all articles are added, commit the changes to the database
+                db.commit()
+
+                print("Index created, continuing - " + time.strftime("%X %x"))
+                db.close()
+            else:
+                print("No FTS supported - cannot create search index.")
         # return an open connection to the SQLite database
         return sqlite3.connect(index_file)
+
+    @staticmethod
+    def _highest_fts_level():
+        # test FTS support in SQLite3; return True, False, or None when only available when loading extension
+        def verify_fts_level(level):
+            # try to create an FTS table using an in-memory DB, or try to explicitly load the extension
+            tmp_db = sqlite3.connect(":memory:")
+            try:
+                tmp_db.execute("CREATE VIRTUAL TABLE capability USING fts" + str(level) + "(title);")
+            except sqlite3.Error:
+                try:
+                    tmp_db.enable_load_extension(True)
+                    tmp_db.load_extension("fts" + str(level))
+                except sqlite3.Error:
+                    return False
+                return None
+            finally:
+                tmp_db.close()
+            return True
+
+        if verify_fts_level(5) is True:
+            return 5
+        if verify_fts_level(4) is True:
+            return 4
+        if verify_fts_level(3) is True:
+            return 3
+        return None
 
     def __exit__(self, *_):
         self._zim_file.close()
