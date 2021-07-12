@@ -1,12 +1,12 @@
-# pyZIM is a ZIM reader written entirely in Python 3.
-# PyZIM takes its inspiration from the Internet in a Box project,
+# ZIMply is a ZIM reader written entirely in Python 3.
+# ZIMply takes its inspiration from the Internet in a Box project,
 #  which can be seen in some of the main structures used in this project,
 #  yet it has been developed independently and is not considered a fork
 #  of the project. For more information on the Internet in a Box project,
 #  do have a look at https://github.com/braddockcg/internet-in-a-box .
 
 
-# Copyright (c) 2016, Kim Bauters, Jim Lemmers
+# Copyright (c) 2016-2021, Kim Bauters, Jim Lemmers, Endless OS Foundation LLC
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -53,6 +53,7 @@ from collections import namedtuple
 from functools import partial, lru_cache
 from math import floor, pow, log
 from struct import Struct, pack, unpack
+from itertools import chain
 
 # non-standard required packages are gevent and falcon (for its web server),
 # as well as and make (for templating)
@@ -62,7 +63,7 @@ import falcon
 
 verbose = False
 
-logging.basicConfig(filename='zimply.log', filemode='w',
+logging.basicConfig(filename="zimply.log", filemode="w",
                     format="%(levelname)s: %(message)s",
                     level=logging.DEBUG if verbose else logging.INFO)
 
@@ -80,18 +81,18 @@ iso639_3to1 = {"ara": "ar", "dan": "da", "nld": "nl", "eng": "en",
                "rus": "ru", "spa": "es", "swe": "sv", "tur": "tr"}
 
 
-def read_zero_terminated(file, encoding):
+def read_zero_terminated(file_resource, encoding):
     """
     Retrieve a ZERO terminated string by reading byte by byte until the ending
     ZERO terminated field is encountered.
-    :param file: the file to read from
+    :param file_resource: the file to read from
     :param encoding: the encoding used for the file
     :return: the decoded string, up to but not including the ZERO termination
     """
     # read until we find the ZERO termination
-    buffer = iter(partial(file.read, 1), ZERO)
+    data_buffer = iter(partial(file_resource.read, 1), ZERO)
     # join all the bytes together
-    field = b"".join(buffer)
+    field = b"".join(data_buffer)
     # transform the bytes into a string and return the string
     return field.decode(encoding=encoding, errors="ignore")
 
@@ -105,8 +106,8 @@ def convert_size(size):
     size_name = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
     power = int(floor(log(size, 1024)))
     base = pow(1024, power)
-    size = round(size/base, 2)
-    return '%s %s' % (size, size_name[power])
+    size = round(size / base, 2)
+    return "%s %s" % (size, size_name[power])
 
 
 #####
@@ -183,29 +184,29 @@ class Block:
             [field.format for field in self._structure]))
         self.size = self._compiled.size
 
-    def unpack(self, buffer, offset=0):
+    def unpack(self, data_buffer, offset=0):
         # Use the Struct to read the binary data in the buffer
         # where this block appears at the given offset.
-        values = self._compiled.unpack_from(buffer, offset)
+        values = self._compiled.unpack_from(data_buffer, offset)
         # Match up each value with the corresponding field in the block
         # and put it in a dictionary for easy reference.
         return {field.field_name: value for value, field in
                 zip(values, self._structure)}
 
-    def _unpack_from_file(self, file, offset=None):
+    def _unpack_from_file(self, file_resource, offset=None):
         if offset is not None:
             # move the pointer in the file to the specified offset;
             # this is not index 0
-            file.seek(offset)
+            file_resource.seek(offset)
         # read in the amount of data corresponding to the block size
-        buffer = file.read(self.size)
+        data_buffer = file_resource.read(self.size)
         # return the values of the fields after unpacking them
-        return self.unpack(buffer)
+        return self.unpack(data_buffer)
 
-    def unpack_from_file(self, file, seek=None):
+    def unpack_from_file(self, file_resource, seek=None):
         # When more advanced behaviour is needed,
         # this method can be overridden by subclassing.
-        return self._unpack_from_file(file, seek)
+        return self._unpack_from_file(file_resource, seek)
 
 
 class HeaderBlock(Block):
@@ -217,15 +218,15 @@ class MimeTypeListBlock(Block):
     def __init__(self, encoding):
         super().__init__("", encoding)
 
-    def unpack_from_file(self, file, offset=None):
+    def unpack_from_file(self, file_resource, offset=None):
         # move the pointer in the file to the specified offset as
         # this is not index 0 when an offset is specified
         if offset is not None:
-            file.seek(offset)
+            file_resource.seek(offset)
         mimetypes = []  # prepare an empty list to store the mimetypes
         while True:
             # get the next zero terminated field
-            s = read_zero_terminated(file, self._encoding)
+            s = read_zero_terminated(file_resource, self._encoding)
             mimetypes.append(s)  # add the newly found mimetype to the list
             if s == "":  # the last entry must be an empty string
                 mimetypes.pop()  # pop the last entry
@@ -234,18 +235,18 @@ class MimeTypeListBlock(Block):
 
 class ClusterBlock(Block):
     def __init__(self, encoding):
-        super().__init__(CLUSTER, encoding)
+        super(ClusterBlock, self).__init__(CLUSTER, encoding)
 
 
 @lru_cache(maxsize=32)  # provide an LRU cache for this object
 class ClusterData(object):
-    def __init__(self, file, offset, encoding):
-        self.file = file  # store the file
+    def __init__(self, file_resource, offset, encoding):
+        self.file = file_resource  # store the file
         self.offset = offset  # store the offset
         cluster_info = ClusterBlock(encoding).unpack_from_file(
             self.file, self.offset)  # Get the cluster fields.
         # Verify whether the cluster has compression
-        self.compression = {4: "lzma", 5: "zstd"}.get(cluster_info['compressionType'], False)
+        self.compression = {4: "lzma", 5: "zstd"}.get(cluster_info["compressionType"], False)
         # at the moment, we don't have any uncompressed data
         self.uncompressed = None
         self._decompress()  # decompress the contents as needed
@@ -281,53 +282,53 @@ class ClusterData(object):
                 try:
                     data = decompressor.decompress(chunk)  # decompress the chunk
                     self.buffer.write(data)  # and store it in the buffer area
-                except zstandard.ZstdError as e:
+                except zstandard.ZstdError:
                     break
 
     def _source_buffer(self):
         # get the file buffer or the decompressed buffer
-        buffer = self.buffer if self.compression else self.file
+        data_buffer = self.buffer if self.compression else self.file
         # move the buffer to the starting position
-        buffer.seek(0 if self.compression else self.offset + 1)
-        return buffer
+        data_buffer.seek(0 if self.compression else self.offset + 1)
+        return data_buffer
 
     def _read_offsets(self):
         # get the buffer for this cluster
-        buffer = self._source_buffer()
+        data_buffer = self._source_buffer()
         # read the offset for the first blob
-        offset0 = unpack("<I", buffer.read(4))[0]
+        offset0 = unpack("<I", data_buffer.read(4))[0]
         # store this one in the list of offsets
         self._offsets.append(offset0)
         # calculate the number of blobs by dividing the first blob by 4
         number_of_blobs = int(offset0 / 4)
         for idx in range(number_of_blobs - 1):
             # store the offsets to all other blobs
-            self._offsets.append(unpack("<I", buffer.read(4))[0])
+            self._offsets.append(unpack("<I", data_buffer.read(4))[0])
 
     def read_blob(self, blob_index):
         # check if the blob falls within the range
         if blob_index >= len(self._offsets) - 1:
             raise IOError("Blob index exceeds number of blobs available: %s" %
                           blob_index)
-        buffer = self._source_buffer()  # get the buffer for this cluster
+        data_buffer = self._source_buffer()  # get the buffer for this cluster
         # calculate the size of the blob
-        blob_size = self._offsets[blob_index+1] - self._offsets[blob_index]
+        blob_size = self._offsets[blob_index + 1] - self._offsets[blob_index]
         # move to the position of the blob relative to current position
-        buffer.seek(self._offsets[blob_index], 1)
-        return buffer.read(blob_size)
+        data_buffer.seek(self._offsets[blob_index], 1)
+        return data_buffer.read(blob_size)
 
 
 class DirectoryBlock(Block):
     def __init__(self, structure, encoding):
         super().__init__(structure, encoding)
 
-    def unpack_from_file(self, file, seek=None):
+    def unpack_from_file(self, file_resource, seek=None):
         # read the first fields as defined in the ARTICLE_ENTRY structure
-        field_values = super()._unpack_from_file(file, seek)
+        field_values = super()._unpack_from_file(file_resource, seek)
         # then read in the url, which is a zero terminated field
-        field_values["url"] = read_zero_terminated(file, self._encoding)
+        field_values["url"] = read_zero_terminated(file_resource, self._encoding)
         # followed by the title, which is again a zero terminated field
-        field_values["title"] = read_zero_terminated(file, self._encoding)
+        field_values["title"] = read_zero_terminated(file_resource, self._encoding)
         field_values["namespace"] = field_values["namespace"].decode(
             encoding=self._encoding, errors="ignore")
         return field_values
@@ -388,6 +389,7 @@ class ZIMFile:
         get_main_page()
       is used to retrieve the main page article for the given ZIM file.
     """
+
     def __init__(self, filename, encoding):
         self._enc = encoding
         # open the file as a binary file
@@ -405,7 +407,7 @@ class ZIMFile:
     def _read_offset(self, index, field_name, field_format, length):
         # move to the desired position in the file
         if index != 0xffffffff:
-            self.file.seek(self.header_fields[field_name] + int(length*index))
+            self.file.seek(self.header_fields[field_name] + int(length * index))
 
             # and read and return the particular format
             read = self.file.read(length)
@@ -469,35 +471,35 @@ class ZIMFile:
         entry = self.read_directory_entry_by_index(index)
         if entry is not None:
             # check if we have a Redirect Entry
-            if 'redirectIndex' in entry.keys():
+            if "redirectIndex" in entry.keys():
                 # if we follow up on redirects, return the article it is
                 # pointing to
                 if follow_redirect:
-                    logging.debug("redirect to " + str(entry['redirectIndex']))
-                    return self._get_article_by_index(entry['redirectIndex'],
+                    logging.debug("redirect to " + str(entry["redirectIndex"]))
+                    return self._get_article_by_index(entry["redirectIndex"],
                                                       follow_redirect)
                 # otherwise, simply return no data
                 # and provide the redirect index as the metadata.
                 else:
-                    return Article(None, entry['namespace'],
-                                   entry['redirectIndex'])
+                    return Article(None, entry["namespace"],
+                                   entry["redirectIndex"])
             else:  # otherwise, we have an Article Entry
                 # get the data and return the Article
-                data = self._read_blob(entry['clusterNumber'],
-                                       entry['blobNumber'])
-                return Article(data, entry['namespace'],
-                               self.mimetype_list[entry['mimetype']])
+                data = self._read_blob(entry["clusterNumber"],
+                                       entry["blobNumber"])
+                return Article(data, entry["namespace"],
+                               self.mimetype_list[entry["mimetype"]])
         else:
             return None
 
     def _get_entry_by_url(self, namespace, url, linear=False):
         if linear:  # if we are performing a linear search ...
             # ... simply iterate over all articles
-            for idx in range(self.header_fields['articleCount']):
+            for idx in range(self.header_fields["articleCount"]):
                 # get the info from the DirectoryBlock at that index
                 entry = self.read_directory_entry_by_index(idx)
                 # if we found the article ...
-                if entry['url'] == url and entry['namespace'] == namespace:
+                if entry["url"] == url and entry["namespace"] == namespace:
                     # return the DirectoryBlock entry and index of the entry
                     return entry, idx
             # return None, None if we could not find the entry
@@ -514,8 +516,8 @@ class ZIMFile:
             while front <= end and not found:
                 middle = floor((front + end) / 2)  # determine the middle index
                 entry = self.read_directory_entry_by_index(middle)
-                logging.debug("checking " + entry['url'])
-                found_title = full_url(entry['namespace'], entry['url'])
+                logging.debug("checking " + entry["url"])
+                found_title = full_url(entry["namespace"], entry["url"])
                 if found_title == title:
                     found = True  # flag it if the item is found
                 else:
@@ -543,7 +545,7 @@ class ZIMFile:
         """
         Get the main page of the ZIM file.
         """
-        main_page = self._get_article_by_index(self.header_fields['mainPage'])
+        main_page = self._get_article_by_index(self.header_fields["mainPage"])
         if main_page is not None:
             return main_page
 
@@ -554,11 +556,11 @@ class ZIMFile:
         """
         metadata = {}
         # iterate backwards over the entries
-        for i in range(self.header_fields['articleCount'] - 1, -1, -1):
+        for i in range(self.header_fields["articleCount"] - 1, -1, -1):
             entry = self.read_directory_entry_by_index(i)  # get the entry
-            if entry['namespace'] == 'M':  # check that it is still metadata
+            if entry["namespace"] == "M":  # check that it is still metadata
                 # turn the key to lowercase as per Kiwix standards
-                m_name = entry['url'].lower()
+                m_name = entry["url"].lower()
                 # get the data, which is encoded as an article
                 metadata[m_name] = self._get_article_by_index(i)[0]
             else:  # stop as soon as we are no longer looking at metadata
@@ -566,7 +568,7 @@ class ZIMFile:
         return metadata
 
     def __len__(self):  # retrieve the number of articles in the ZIM file
-        return self.header_fields['articleCount']
+        return self.header_fields["articleCount"]
 
     def __iter__(self):
         """
@@ -574,13 +576,13 @@ class ZIMFile:
         :return: a yielded entry of an article, containing its full URL,
                   its title, and the index of the article
         """
-        for idx in range(self.header_fields['articleCount']):
+        for idx in range(self.header_fields["articleCount"]):
             # get the Directory Entry
             entry = self.read_directory_entry_by_index(idx)
-            if entry['namespace'] == "A":
+            if entry["namespace"] == "A":
                 # add the full url to the entry
-                entry['fullUrl'] = full_url(entry['namespace'], entry['url'])
-                yield entry['fullUrl'], entry['title'], idx
+                entry["fullUrl"] = full_url(entry["namespace"], entry["url"])
+                yield entry["fullUrl"], entry["title"], idx
 
     def close(self):
         self.file.close()
@@ -750,8 +752,8 @@ class ZIMRequestHandler:
             response.content_type = "text/HTML" if search else article.mimetype
 
             if not navigation_location:  # check if the article location is set
-                    # if not, default to "browse" (non-search, non-main page)
-                    navigation_location = "browse"
+                # if not, default to "browse" (non-search, non-main page)
+                navigation_location = "browse"
 
             if not search:  # if we did not have a search, but a plain article
                 if is_article:
@@ -797,26 +799,25 @@ class ZIMRequestHandler:
                         # read the directory entry by index (rather than URL)
                         entry = self.zim.read_directory_entry_by_index(row[0])
                         # add the full url to the entry
-                        if entry.get('redirectIndex'):
+                        if entry.get("redirectIndex"):
                             redirects.append(entry)
                         else:
                             entries.append(entry)
-                    indexes = set(entry['index'] for entry in entries)
+                    indexes = set(entry["index"] for entry in entries)
                     print(indexes)
                     redirects = [entry for entry in redirects if
-                                 entry['redirectIndex'] not in indexes]
+                                 entry["redirectIndex"] not in indexes]
 
-                    from itertools import chain 
                     entries = list(chain(entries, redirects))
-                    titles = [entry['title'] for entry in entries]
+                    titles = [entry["title"] for entry in entries]
                     scores = self.bm25.calculate_scores(keywords, titles)
                     weighted_result = sorted(zip(scores, entries),
                                              reverse=True, key=lambda x: x[0])
 
                     for weight, entry in weighted_result:
                         print(weight, entry)
-                        body += '<a href="{}">{}</a><br />'.format(
-                            entry['url'], entry['title'])
+                        body += "<a href=\"{}\">{}</a><br />".format(
+                            entry["url"], entry["title"])
 
         else:  # if we did not achieve success
             response.status = falcon.HTTP_404
@@ -837,7 +838,7 @@ class ZIMRequestHandler:
 class ZIMServer:
     def __init__(self, filename, index_file="",
                  template=pkg_resources.resource_filename(
-                     __name__, 'template.html'),
+                     __name__, "template.html"),
                  ip_address="", port=9454, encoding="utf-8"):
         # create the object to access the ZIM file
         self._zim_file = ZIMFile(filename, encoding)
@@ -869,9 +870,9 @@ class ZIMServer:
         app = falcon.API()
         main = ZIMRequestHandler()
         # create a simple sync that forwards all requests; TODO: only allow GET
-        app.add_sink(main.on_get, prefix='/')
-        _address = 'localhost' if ip_address == '' else ip_address
-        print(f'up and running on http://{_address}:{port}')
+        app.add_sink(main.on_get, prefix="/")
+        _address = "localhost" if ip_address == "" else ip_address
+        print("up and running on http://" + _address + ":" + str(port) + "")
         # start up the HTTP server on the desired port
         pywsgi.WSGIServer((ip_address, port), app).serve_forever()
 
@@ -880,7 +881,7 @@ class ZIMServer:
             logging.info("No index was found at " + str(index_file) +
                          ", so now creating the index.")
             print("Please wait as the index is created, "
-                  "this can take quite some time! - " + time.strftime('%X %x'))
+                  "this can take quite some time! - " + time.strftime("%X %x"))
 
             db = sqlite3.connect(index_file)
             cursor = db.cursor()
@@ -900,7 +901,7 @@ class ZIMServer:
             # once all articles are added, commit the changes to the database
             db.commit()
 
-            print("Index created, continuing - " + time.strftime('%X %x'))
+            print("Index created, continuing - " + time.strftime("%X %x"))
             db.close()
         # return an open connection to the SQLite database
         return sqlite3.connect(index_file)
