@@ -34,6 +34,8 @@
 # those of the authors and should not be interpreted as representing official
 # policies, either expressed or implied, of the FreeBSD Project.
 
+from __future__ import division
+from __future__ import print_function
 
 from gevent import monkey, pywsgi
 # make sure to do the monkey-patching before loading the falcon package!
@@ -41,19 +43,62 @@ monkey.patch_all()
 
 import io
 import logging
-import lzma
 import zstandard
 import os
 import pkg_resources
 import re
 import sqlite3
 import time
-import urllib
 from collections import namedtuple
-from functools import partial, lru_cache
+from functools import partial
 from math import floor, pow, log
 from struct import Struct, pack, unpack
 from itertools import chain
+
+# Python 2.7 workarounds
+import sys
+
+IS_PY3 = sys.version_info > (3, 0)
+
+
+# custom function to convert to bytes that is compatible both with Python 3.4+ and Python 2.7
+def to_bytes(data, encoding):
+    if IS_PY3:
+        return bytes(data, encoding)
+    else:
+        return data if isinstance(data, bytes) else data.encode(encoding)
+
+
+try:
+    import lzma
+except ImportError:
+    # not default, requires backports.lzma
+    # https://pypi.org/project/backports.lzma/
+    from backports import lzma
+
+try:
+    from urllib.parse import unquote
+except ImportError:
+    from urllib import unquote as stdlib_unquote
+
+    # make unquote in Python 2.7 behave as in Python 3
+    def unquote(string, encoding="utf-8", errors="replace"):
+        if not isinstance(string, bytes):
+            raise TypeError("A bytes-like object is required: got '{}'".format(type(string)))
+        return stdlib_unquote(string.encode(encoding)).decode(encoding, errors=errors)
+
+try:
+    from functools import lru_cache
+except ImportError:
+    # no Python 2.7 support; make a stub instead
+    def lru_cache(**kwargs):
+        def wrap(func):
+            def wrapped(*args, **kwargs):
+                return func(*args, **kwargs)
+
+            return wrapped
+
+        return wrap
 
 # non-standard required packages are gevent and falcon (for its web server),
 # as well as and make (for templating)
@@ -173,7 +218,7 @@ CLUSTER = [  # define the CLUSTER structure of a ZIM file
 # the different structures in a ZIM file.
 #####
 
-class Block:
+class Block(object):
     def __init__(self, structure, encoding):
         self._structure = structure
         self._encoding = encoding
@@ -211,12 +256,12 @@ class Block:
 
 class HeaderBlock(Block):
     def __init__(self, encoding):
-        super().__init__(HEADER, encoding)
+        super(HeaderBlock, self).__init__(HEADER, encoding)
 
 
 class MimeTypeListBlock(Block):
     def __init__(self, encoding):
-        super().__init__("", encoding)
+        super(MimeTypeListBlock, self).__init__("", encoding)
 
     def unpack_from_file(self, file_resource, offset=None):
         # move the pointer in the file to the specified offset as
@@ -320,11 +365,11 @@ class ClusterData(object):
 
 class DirectoryBlock(Block):
     def __init__(self, structure, encoding):
-        super().__init__(structure, encoding)
+        super(DirectoryBlock, self).__init__(structure, encoding)
 
     def unpack_from_file(self, file_resource, seek=None):
         # read the first fields as defined in the ARTICLE_ENTRY structure
-        field_values = super()._unpack_from_file(file_resource, seek)
+        field_values = super(DirectoryBlock, self)._unpack_from_file(file_resource, seek)
         # then read in the url, which is a zero terminated field
         field_values["url"] = read_zero_terminated(file_resource, self._encoding)
         # followed by the title, which is again a zero terminated field
@@ -336,12 +381,12 @@ class DirectoryBlock(Block):
 
 class ArticleEntryBlock(DirectoryBlock):
     def __init__(self, encoding):
-        super().__init__(ARTICLE_ENTRY, encoding)
+        super(ArticleEntryBlock, self).__init__(ARTICLE_ENTRY, encoding)
 
 
 class RedirectEntryBlock(DirectoryBlock):
     def __init__(self, encoding):
-        super().__init__(REDIRECT_ENTRY, encoding)
+        super(RedirectEntryBlock, self).__init__(REDIRECT_ENTRY, encoding)
 
 
 #####
@@ -350,7 +395,7 @@ class RedirectEntryBlock(DirectoryBlock):
 #####
 
 def full_url(namespace, url):
-    return str(namespace) + '/' + str(url)
+    return namespace + u"/" + url
 
 
 def binary_search(func, item, front, end):
@@ -692,7 +737,7 @@ class ZIMRequestHandler:
 
         location = request.relative_uri
         # replace the escaped characters by their corresponding string values
-        location = urllib.parse.unquote(location)
+        location = unquote(location, ZIMRequestHandler.encoding)
         components = location.split("?")
         navigation_location = None
         is_article = True  # assume an article is requested, for now
@@ -706,7 +751,9 @@ class ZIMRequestHandler:
         else:
             # The location is given as domain.com/namespace/url/parts/ ,
             # as used in the ZIM link or, alternatively, as domain.com/page.htm
-            _, namespace, *url_parts = location.split("/")
+            splits = location.split("/")
+            namespace = splits[1]
+            url_parts = splits[2:]
 
             # are we dealing with an address bar request, eg. /article_name.htm
             if len(namespace) > 1:
@@ -739,7 +786,8 @@ class ZIMRequestHandler:
             if arguments.find("q=") == 0:
                 search = True  # if so, we have a search
                 navigation_location = "search"  # update navigation location
-                arguments = re.sub(r"^q=", r"", arguments)  # remove the q=
+                # CAREFUL: the str() in the next line convert unicode to ASCII string
+                arguments = re.sub(r"^q=", r"", str(arguments))  # remove the q=
                 keywords = arguments.split("+")  # split all keywords using +
             else:  # if the required ?q= is not found at the start ...
                 success = False  # not a search, although we thought it was one
@@ -828,7 +876,7 @@ class ZIMRequestHandler:
         if not result:  # if the result hasn't been prefilled ...
             result = template.render(location=navigation_location, body=body,
                                      head=head, title=title)  # render template
-            response.data = bytes(result, encoding=ZIMRequestHandler.encoding)
+            response.data = to_bytes(result, encoding=ZIMRequestHandler.encoding)
         else:
             # if result is already filled, push it through as-is
             # (i.e. binary resource)
@@ -844,7 +892,7 @@ class ZIMServer:
         self._zim_file = ZIMFile(filename, encoding)
         # get the language of the ZIM file and convert it to ISO639_1 or
         # default to "en" if unsupported
-        default_iso = bytes("eng", encoding=encoding)
+        default_iso = to_bytes("eng", encoding=encoding)
         iso639 = self._zim_file.metadata().get("language", default_iso) \
             .decode(encoding=encoding, errors="ignore")
         lang = iso639_3to1.get(iso639, "en")
