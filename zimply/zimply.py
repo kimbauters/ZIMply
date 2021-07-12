@@ -671,18 +671,20 @@ class BM25:
         # also turn each document into lowercase
         corpus = [document.lower().split() for document in corpus]
 
+        result = []  # prepare a list to keep the resulting scores
+        if corpus_size == 0:
+            return result  # nothing to do
+
         # Determine the average number of words in each document
         # (simply count the number of spaces) store them in a dict with the
         # hash of the document as the key and the number of words as value.
         doc_lens = [len(doc) for doc in corpus]
-        avg_doc_len = sum(doc_lens) / len(corpus)
+        avg_doc_len = sum(doc_lens) / corpus_size
         query_terms = []
 
         for term in query:
             frequency = sum(document.count(term) for document in corpus)
             query_terms.append((term, frequency))
-
-        result = []  # prepare a list to keep the resulting scores
 
         # calculate the score of each document in the corpus
         for i, document in enumerate(corpus):
@@ -695,8 +697,11 @@ class BM25:
                 # count how often the term occurs in the document itself
                 doc_freq = document.count(term)
                 doc_k1 = doc_freq * (self.k1 + 1)
-                doc_b = (1 - self.b + self.b * (doc_lens[i] / avg_doc_len))
-                total_score += idf * (doc_k1 / (doc_freq + (self.k1 * doc_b)))
+                if avg_doc_len == 0:
+                    total_score += 0
+                else:
+                    doc_b = (1 - self.b + self.b * (doc_lens[i] / avg_doc_len))
+                    total_score += idf * (doc_k1 / (doc_freq + (self.k1 * doc_b)))
 
             # once the score for all terms is summed up,
             # add this score to the result list
@@ -833,7 +838,7 @@ class ZIMRequestHandler:
 
                 cursor = ZIMRequestHandler.reverse_index.cursor()
                 search_for = "* ".join(keywords) + "*"
-                cursor.execute("SELECT docid FROM papers WHERE title MATCH ?",
+                cursor.execute("SELECT rowid FROM papers WHERE title MATCH ?",
                                [search_for])
 
                 results = cursor.fetchall()
@@ -935,16 +940,16 @@ class ZIMServer:
             cursor = db.cursor()
             # limit memory usage to 64MB
             cursor.execute("PRAGMA CACHE_SIZE = -65536")
-            # create a contentless virtual table using full-text search (FTS4)
-            # and the porter tokeniser
+            # create a content-less virtual table using full-text search (FTS5)
+            # and the porter tokenizer
             cursor.execute("CREATE VIRTUAL TABLE papers "
-                           "USING fts4(content='', title, tokenize=porter);")
+                           "USING fts5(content='', title, tokenize=porter);")
             # get an iterator to access all the articles
             articles = iter(self._zim_file)
 
             for url, title, idx in articles:  # retrieve articles one by one
                 cursor.execute(
-                    "INSERT INTO papers(docid, title) VALUES (?, ?)",
+                    "INSERT INTO papers(rowid, title) VALUES (?, ?)",
                     (idx, title))  # and add them
             # once all articles are added, commit the changes to the database
             db.commit()
