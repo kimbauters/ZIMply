@@ -55,6 +55,14 @@ from math import floor, pow, log
 from struct import Struct, pack, unpack
 from itertools import chain
 
+# add Xapian support - if available
+
+try:
+    import xapian
+    FOUND_XAPIAN = True
+except ImportError:
+    FOUND_XAPIAN = False
+
 # Python 2.7 workarounds
 import sys
 
@@ -350,7 +358,8 @@ class ClusterData(object):
             # store the offsets to all other blobs
             self._offsets.append(unpack("<I", data_buffer.read(4))[0])
 
-    def read_blob(self, blob_index):
+    # return either the blob itself or its offset (when return_offset is set to True)
+    def read_blob(self, blob_index, return_offset=False):
         # check if the blob falls within the range
         if blob_index >= len(self._offsets) - 1:
             raise IOError("Blob index exceeds number of blobs available: %s" %
@@ -360,7 +369,7 @@ class ClusterData(object):
         blob_size = self._offsets[blob_index + 1] - self._offsets[blob_index]
         # move to the position of the blob relative to current position
         data_buffer.seek(self._offsets[blob_index], 1)
-        return data_buffer.read(blob_size)
+        return data_buffer.read(blob_size) if not return_offset else data_buffer.tell()
 
 
 class DirectoryBlock(Block):
@@ -503,15 +512,17 @@ class ZIMFile:
             directory_values["index"] = index
             return directory_values  # and return all these directory values
 
-    def _read_blob(self, cluster_index, blob_index):
+    # return either the blob itself or its offset (when return_offset is set to True)
+    def _read_blob(self, cluster_index, blob_index, return_offset=False):
         # get the cluster offset
         offset = self._read_cluster_offset(cluster_index)
         # get the actual cluster data
         cluster_data = ClusterData(self.file, offset, self._enc)
         # return the data read from the cluster at the given blob index
-        return cluster_data.read_blob(blob_index)
+        return cluster_data.read_blob(blob_index, return_offset=return_offset)
 
-    def _get_article_by_index(self, index, follow_redirect=True):
+    # return either the article itself or its offset (when return_offset is set to True)
+    def _get_article_by_index(self, index, follow_redirect=True, return_offset=False):
         # get the info from the DirectoryBlock at the given index
         entry = self.read_directory_entry_by_index(index)
         if entry is not None:
@@ -521,19 +532,18 @@ class ZIMFile:
                 # pointing to
                 if follow_redirect:
                     logging.debug("redirect to " + str(entry["redirectIndex"]))
-                    return self._get_article_by_index(entry["redirectIndex"],
-                                                      follow_redirect)
+                    return self._get_article_by_index(entry["redirectIndex"], follow_redirect, return_offset)
                 # otherwise, simply return no data
                 # and provide the redirect index as the metadata.
                 else:
-                    return Article(None, entry["namespace"],
-                                   entry["redirectIndex"])
+                    return None if return_offset else Article(None, entry["namespace"], entry["redirectIndex"])
             else:  # otherwise, we have an Article Entry
                 # get the data and return the Article
-                data = self._read_blob(entry["clusterNumber"],
-                                       entry["blobNumber"])
-                return Article(data, entry["namespace"],
-                               self.mimetype_list[entry["mimetype"]])
+                result = self._read_blob(entry["clusterNumber"], entry["blobNumber"], return_offset)
+                if return_offset:
+                    return result
+                else:  # we received the blob back; use it to create an Article object
+                    return Article(result, entry["namespace"], self.mimetype_list[entry["mimetype"]])
         else:
             return None
 
@@ -585,6 +595,14 @@ class ZIMFile:
         if idx:  # we found an index and return the article at that index
             return self._get_article_by_index(
                 idx, follow_redirect=follow_redirect)
+
+    def get_xapian_offset(self):
+        # identify whether a full-text Xapian index is available
+        _, xapian_idx = self._get_entry_by_url("X", "fulltext/xapian")
+        if not xapian_idx:  # if we did not get a response try a title index instead as fallback option
+            _, xapian_idx = self._get_entry_by_url("X", "title/xapian")
+        # return the offset if we found either the full-text or Title index, or return None otherwise
+        return self._get_article_by_index(xapian_idx, follow_redirect=True, return_offset=True) if xapian_idx else None
 
     def get_main_page(self):
         """
@@ -723,6 +741,8 @@ class ZIMRequestHandler:
     reverse_index = None
     # provide another class variable to store the schema for the index file
     schema = None
+    # provide a class variable to store a reference to the Xapian database
+    xapian_index = None
     # store the location of the template file in a class variable
     template = None
     # the encoding, stored in a class variable, for the ZIM file contents
@@ -913,8 +933,19 @@ class ZIMServer:
         ZIMRequestHandler.zim = self._zim_file
         # set the index schema to a class variable of ZIMRequestHandler
         # ZIMRequestHandler.schema = self._schema
-        # set (and create) the index to a class variable
-        ZIMRequestHandler.reverse_index = self._bootstrap(index_file)
+        has_index = False
+        if FOUND_XAPIAN:
+            xapian_offset = self._zim_file.get_xapian_offset()
+            print(xapian_offset)
+            if xapian_offset is not None:
+                xapian_file = open(filename)
+                xapian_file.seek(xapian_offset)
+                db = xapian.Database(xapian_file.fileno())
+                ZIMRequestHandler.xapian_index = db
+                has_index = True
+        if not has_index:
+            # set (and create) the index to a class variable
+            ZIMRequestHandler.reverse_index = self._bootstrap_index(index_file)
         # set the template to a class variable of ZIMRequestHandler
         ZIMRequestHandler.template = template
         # set the encoding to a class variable of ZIMRequestHandler
@@ -929,7 +960,7 @@ class ZIMServer:
         # start up the HTTP server on the desired port
         pywsgi.WSGIServer((ip_address, port), app).serve_forever()
 
-    def _bootstrap(self, index_file):
+    def _bootstrap_index(self, index_file):
         if not os.path.exists(index_file):  # check whether the index exists
             logging.info("No index was found at " + str(index_file) +
                          ", so now creating the index.")
