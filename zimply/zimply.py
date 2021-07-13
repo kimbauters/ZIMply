@@ -54,6 +54,7 @@ from functools import partial
 from math import floor, pow, log
 from struct import Struct, pack, unpack
 from itertools import chain
+from hashlib import sha256
 
 # add Xapian support - if available
 
@@ -456,6 +457,20 @@ class ZIMFile:
 
         self.articleEntryBlock = ArticleEntryBlock(self._enc)
         self.clusterFormat = ClusterBlock(self._enc)
+
+    def checksum(self, extra_fields=None):
+        # create a checksum to uniquely identify this zim file
+        # the UUID should be enough, but let's play it safe and also include the other header info
+        if not extra_fields:
+            extra_fields = {}
+        checksum_entries = []
+        fields = self.header_fields.copy()
+        fields.update(extra_fields)
+        # collect all the HEADER values and make sure they are ordered
+        for key in sorted(fields.keys()):
+            checksum_entries.append("'" + key + "': " + str(fields[key]))
+        checksum_message = (", ".join(checksum_entries)).encode("ascii")
+        return sha256(checksum_message).hexdigest()
 
     def _read_offset(self, index, field_name, field_format, length):
         # move to the desired position in the file
@@ -951,7 +966,7 @@ class ZIMRequestHandler:
 
 class ZIMServer:
     def __init__(self, filename, index_file="", template=pkg_resources.resource_filename(__name__, "template.html"),
-                 ip_address="", port=9454, encoding="utf-8"):
+                 ip_address="", port=9454, encoding="utf-8", *, auto_delete=False):
         # create the object to access the ZIM file
         self._zim_file = ZIMFile(filename, encoding)
         # get the language of the ZIM file and convert it to ISO639_1 or
@@ -962,7 +977,10 @@ class ZIMServer:
         logging.info("A ZIM file in the language " + str(lang) +
                      " (ISO639-1) was found, containing " + str(len(self._zim_file)) + " articles.")
         if not index_file:
-            index_file = os.path.join(os.path.dirname(filename), "index.idx")
+            base = os.path.basename(filename)
+            name = os.path.splitext(base)[0]
+            # name the index file the same as the zim file with a different extension
+            index_file = os.path.join(os.path.dirname(filename), name + ".idx")
         logging.info("The index file is determined to be located at " + str(index_file) + ".")
 
         # set this object to a class variable of ZIMRequestHandler
@@ -970,7 +988,7 @@ class ZIMServer:
         ZIMRequestHandler.language = lang
         # set the index schema to a class variable of ZIMRequestHandler
         # ZIMRequestHandler.schema = self._schema
-        has_index = False
+        has_xapian_index = False
         if FOUND_XAPIAN:
             xapian_offset = self._zim_file.get_xapian_offset()
             if xapian_offset is not None:
@@ -978,10 +996,10 @@ class ZIMServer:
                 xapian_file.seek(xapian_offset)
                 db = xapian.Database(xapian_file.fileno())
                 ZIMRequestHandler.xapian_index = db
-                has_index = True
-        if not has_index:
+                has_xapian_index = True
+        if not has_xapian_index:
             # set (and create) the index to a class variable
-            ZIMRequestHandler.reverse_index = self._bootstrap_index(index_file)
+            ZIMRequestHandler.reverse_index = self._bootstrap_index(index_file, self._zim_file, auto_delete=auto_delete)
         # set the template to a class variable of ZIMRequestHandler
         ZIMRequestHandler.template = template
         # set the encoding to a class variable of ZIMRequestHandler
@@ -996,15 +1014,41 @@ class ZIMServer:
         # start up the HTTP server on the desired port
         pywsgi.WSGIServer((ip_address, port), app).serve_forever()
 
-    def _bootstrap_index(self, index_file):
+    def _bootstrap_index(self, index_file, zim_file, *, auto_delete=False):
+        # the index_file is a full path; use it to construct a full path for the checksum .chk file
+        base = os.path.basename(index_file)
+        name = os.path.splitext(base)[0]
+        # name the checksum file the same as the index file with a different extension
+        checksum_file = os.path.join(os.path.dirname(index_file), name + ".chk")
+
+        # there are a number of steps to walk through:
+        #  - if the index exists, then calculate the checksum and verify it with the checksum file
+        #     - if the checksum matches -> open the index
+        #     - if the checksum is wrong -> do not open the file
+        #  - if the index does not exist create it as well as the checksum file
+
+        # retrieve the maximum FTS level supported by SQLite
+        level = self._highest_fts_level()
+        if level is None:
+            print("No FTS supported - cannot create search index.")
+            return None
+        logging.info("Support found for FTS" + str(level) + ".")
+
+        checksum = zim_file.checksum({"fts": level})
+
         if not os.path.exists(index_file):  # check whether the index exists
             logging.info("No index was found at " + str(index_file) + ", so now creating the index.")
             print("Please wait as the index is created, this can take quite some time! - " + time.strftime("%X %x"))
 
-            level = self._highest_fts_level()
-            if level:
-                logging.info("Support found for FTS" + str(level) + ".")
+            created_checksum = False
+            created_search_index = False
+            try:
+                with open(checksum_file, "w") as file:
+                    file.write(checksum)
+                    created_checksum = True
+
                 db = sqlite3.connect(index_file)
+                created_search_index = True
                 cursor = db.cursor()
                 # limit memory usage to 64MB
                 cursor.execute("PRAGMA CACHE_SIZE = -65536")
@@ -1022,8 +1066,47 @@ class ZIMServer:
 
                 print("Index created, continuing - " + time.strftime("%X %x"))
                 db.close()
+            except (sqlite3.Error, IOError) as error:
+                if isinstance(error, sqlite3.Error):
+                    print("Unable to create the search index - unexpected SQLite error.")
+                else:
+                    print("Unable to write the checksum or the search index.")
+                if created_checksum:
+                    os.remove(checksum_file)
+                if created_search_index:
+                    os.remove(index_file)
+                return None
+        else:
+            # verify that the checksum file exists, and that it holds the correct checksum value
+            verified = True
+            try:
+                if os.path.isfile(checksum_file):
+                    with open(checksum_file, "r") as file:
+                        line = file.readline()
+                        if line != checksum:
+                            print("The checksum of the search index does not match the opened ZIM file.")
+                            verified = False
+                else:
+                    print("No checksum file found.")
+                    verified = False
+            except IOError:
+                pass
+
+            if not verified and auto_delete:
+                print("... trying to delete the search index so it can be updated.")
+                try:
+                    # first delete the checksum file
+                    # this prevents the need to recreate the index if the checksum file cannot be deleted
+                    # and the correct checksum file can be recovered from its corrupted state
+                    os.remove(checksum_file)
+                    os.remove(index_file)
+                    return self._bootstrap_index(index_file, zim_file)
+                except IOError:
+                    print("... unable to delete the files.")
+                    return None
             else:
-                print("No FTS supported - cannot create search index.")
+                return None
+
         # return an open connection to the SQLite database
         return sqlite3.connect(index_file)
 
