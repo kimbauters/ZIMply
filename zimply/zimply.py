@@ -52,7 +52,7 @@ import time
 from collections import namedtuple
 from functools import partial
 from math import floor, pow, log
-from struct import Struct, pack, unpack
+from struct import Struct, pack, unpack, error as struct_error
 from itertools import chain
 from hashlib import sha256
 
@@ -128,6 +128,7 @@ logging.basicConfig(filename="zimply.log", filemode="w",
 ZERO = pack("B", 0)  # defined for zero terminated fields
 Field = namedtuple("Field", ["format", "field_name"])  # a tuple
 Article = namedtuple("Article", ["data", "namespace", "mimetype"])  # a triple
+Namespace = namedtuple("Namespace", ["count", "start", "end", "namespace"])  # a quadruple
 
 iso639_3to1 = {"ara": "ar", "dan": "da", "nld": "nl", "eng": "en",
                "fin": "fi", "fra": "fr", "deu": "de", "hun": "hu",
@@ -450,8 +451,7 @@ class ZIMFile:
         self.file = open(filename, "rb")
         # retrieve the header fields
         self.header_fields = HeaderBlock(self._enc).unpack_from_file(self.file)
-        self.mimetype_list = MimeTypeListBlock(self._enc).unpack_from_file(
-            self.file, self.header_fields["mimeListPos"])
+        self.mimetype_list = MimeTypeListBlock(self._enc).unpack_from_file(self.file, self.header_fields["mimeListPos"])
         # create the object once for easy access
         self.redirectEntryBlock = RedirectEntryBlock(self._enc)
 
@@ -655,13 +655,69 @@ class ZIMFile:
         :return: a yielded entry of an article, containing its full URL,
                   its title, and the index of the article
         """
-        for idx in range(self.header_fields["articleCount"]):
-            # get the Directory Entry
-            entry = self.read_directory_entry_by_index(idx)
-            if entry["namespace"] == "A":
-                # add the full url to the entry
+
+        article_namespace = self.get_namespace_range("A")
+
+        if article_namespace.start is not None and article_namespace.end is not None:
+            for idx in range(article_namespace.start, article_namespace.end + 1):
+                # get the Directory Entry
+                entry = self.read_directory_entry_by_index(idx)
                 entry["fullUrl"] = full_url(entry["namespace"], entry["url"])
                 yield entry["fullUrl"], entry["title"], idx
+
+    @lru_cache(maxsize=32)  # provide an LRU cache for this object
+    def get_namespace_range(self, namespace):
+        """
+        Retrieve information on a namespace including the number of entries and the start/end index
+        :param namespace: the namespace to look for such as "A"
+        :return: a Namespace object with the count, and start/end index of entries (inclusive)
+        """
+        start_low = 0
+        start_high = self.header_fields["articleCount"] - 1
+        start = None
+
+        while start_high >= start_low and start is None:
+            start_mid = (start_high + start_low) // 2
+            entry = self.read_directory_entry_by_index(start_mid)
+            before = None
+            try:
+                before = self.read_directory_entry_by_index(start_mid - 1)
+            except struct_error:
+                pass
+
+            if entry["namespace"] == namespace and (before is None or before["namespace"] != namespace):
+                start = start_mid
+            elif entry["namespace"] >= namespace:
+                start_high = start_mid - 1
+            else:
+                start_low = start_mid + 1
+
+        if start is None:
+            return Namespace(0, None, None, namespace)
+
+        end_low = start
+        end_high = self.header_fields["articleCount"] - 1
+        end = None
+
+        while end_high >= end_low and end is None:
+            end_mid = (end_high + end_low) // 2
+            entry = self.read_directory_entry_by_index(end_mid)
+            after = None
+            try:
+                after = self.read_directory_entry_by_index(end_mid + 1)
+            except struct_error:
+                pass
+            if entry["namespace"] == namespace and (after is None or after["namespace"] != namespace):
+                end = end_mid
+            elif entry["namespace"] <= namespace:
+                end_low = end_mid + 1
+            else:
+                end_high = end_mid - 1
+
+        if end is None:
+            return Namespace(0, None, None, namespace)
+
+        return Namespace(end - start + 1, start, end, namespace)
 
     def close(self):
         self.file.close()
