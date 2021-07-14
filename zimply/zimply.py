@@ -647,7 +647,7 @@ class ZIMFile:
         return metadata
 
     def __len__(self):  # retrieve the number of articles in the ZIM file
-        return self.header_fields["articleCount"]
+        return self.get_namespace_range("A").count
 
     def __iter__(self):
         """
@@ -904,207 +904,60 @@ class XapianIndex(SearchIndex):
         return sorted(entries, reverse=True, key=lambda x: x.score)
 
 
-#####
-# The supporting classes to provide the HTTP server. This includes the template
-# and the actual request handler that uses the ZIM file to retrieve the desired
-# page, images, CSS, etc.
-#####
-
-class ZIMRequestHandler:
-    # provide for a class variable to store the ZIM file object
-    zim = None
-    # the (main) language of the ZIM file contents
-    language = "en"
-    # provide a class variable to store the search index
-    search_index = None
-    # store the location of the template file in a class variable
-    template = None
-    # the encoding, stored in a class variable, for the ZIM file contents
-    encoding = ""
-
-    def __init__(self):
-        pass
-
-    def on_get(self, request, response):
-        """
-        Process a HTTP GET request. An object is this class is created whenever
-        an HTTP request is generated. This method is triggered when the request
-        is of any type, typically a GET. This method will redirect the user,
-        based on the request, to the index/search/correct page, or an error
-        page if the resource is unavailable.
-        """
-
-        location = request.relative_uri
-        # replace the escaped characters by their corresponding string values
-        location = unquote(location, ZIMRequestHandler.encoding)
-        components = location.split("?")
-        navigation_location = None
-        is_article = True  # assume an article is requested, for now
-        # if trying for the main page ...
-        if location in ["/", "/index.htm", "/index.html", "/main.htm", "/main.html"]:
-            # ... return the main page as the article
-            article = ZIMRequestHandler.zim.get_main_page()
-            if article is not None:
-                navigation_location = "main"
-        else:
-            # The location is given as domain.com/namespace/url/parts/ ,
-            # as used in the ZIM link or, alternatively, as domain.com/page.htm
-            splits = location.split("/")
-            namespace = splits[1]
-            url_parts = splits[2:]
-
-            # are we dealing with an address bar request, eg. /article_name.htm
-            if len(namespace) > 1:
-                url = namespace  # the namespace is then the URL
-                namespace = "A"  # and the namespace is an article
-            else:
-                # combine all the url parts together again
-                url = "/".join(url_parts)
-            # get the desired article
-            article = ZIMRequestHandler.zim.get_article_by_url(namespace, url)
-            # we have an article when the namespace is A
-            # (i.e. not a photo, etc.)
-            is_article = (namespace == "A")
-
-        # from this point forward, "article" refers to an element in the ZIM
-        # database whereas is_article refers to a Boolean to indicate whether
-        # the "article" is a true article, i.e. a webpage
-        success = True  # assume the request succeeded
-        search = False  # assume we do not have a search
-        keywords = ""  # the keywords to search for
-
-        if not article and len(components) <= 1:
-            # there is no article to be retrieved,
-            # and there is no ? in the URI to indicate a search
-            success = False
-        elif len(components) > 1:  # check if URI of the form main?arguments
-            # retrieve the arguments part by popping the top of the sequence
-            arguments = components.pop()
-            # check if arguments starts with ?q= to indicate a proper search
-            if arguments.find("q=") == 0:
-                search = True  # if so, we have a search
-                navigation_location = "search"  # update navigation location
-                # CAREFUL: the str() in the next line convert unicode to ASCII string
-                arguments = re.sub(r"^q=", r"", str(arguments))  # remove the q=
-                keywords = arguments.split("+")  # split all keywords using +
-            else:  # if the required ?q= is not found at the start ...
-                success = False  # not a search, although we thought it was one
-
-        template = Template(filename=ZIMRequestHandler.template)
-        result = body = head = title = ""  # preset all template variables
-        if success:  # if successful, i.e. we found the requested resource
-            response.status = falcon.HTTP_200  # respond with a success code
-            # set the content type based on the article mimetype
-            response.content_type = "text/HTML" if search else article.mimetype
-
-            if not navigation_location:  # check if the article location is set
-                # if not, default to "browse" (non-search, non-main page)
-                navigation_location = "browse"
-
-            if not search:  # if we did not have a search, but a plain article
-                if is_article:
-                    text = article.data  # we have an actual article
-                    # decode its contents into a string using its encoding
-                    text = text.decode(encoding=ZIMRequestHandler.encoding)
-                    # retrieve the body from the ZIM article
-                    m = re.search(r"<body.*?>(.*?)</body>", text, re.S)
-                    body = m.group(1) if m else ""
-                    # retrieve the head from the ZIM article
-                    m = re.search(r"<head.*?>(.*?)</head>", text, re.S)
-                    head = m.group(1) if m else ""
-                    # retrieve the title from the ZIM article
-                    m = re.search(r"<title.*?>(.*?)</title>", text, re.S)
-                    title = m.group(1) if m else ""
-                    logging.info("accessing the article: " + title)
-                else:
-                    # just a binary blob, so use it as such
-                    result = article.data
-            else:  # if we did have a search form
-                # show the search query in the title
-                title = "search results for >> " + " ".join(keywords)
-                logging.info("searching for keywords >> " + " ".join(keywords))
-
-                # use the keywords to search the index
-                # q = qp.parse(" ".join(keywords))
-
-                weighted_result = []
-
-                if self.search_index:
-                    weighted_result = self.search_index.search(" ".join(keywords))
-
-                # present the results irrespective of the index we used
-                if not weighted_result:
-                    # ... let the user know there are no results
-                    body = "no results found for: " + " <i>" + " ".join(keywords) + "</i>"
-                else:
-                    for entry in weighted_result:
-                        logging.info(str(entry.score) + ": " + str(entry))
-                        body += "<a href=\"{}\">{}</a><br />".format(entry.url, entry.title)
-
-        else:  # if we did not achieve success
-            response.status = falcon.HTTP_404
-            response.content_type = "text/HTML"
-            title = "Page 404"
-            body = "requested resource not found"
-
-        if not result:  # if the result hasn't been prefilled ...
-            result = template.render(location=navigation_location, body=body,
-                                     head=head, title=title)  # render template
-            response.data = to_bytes(result, encoding=ZIMRequestHandler.encoding)
-        else:
-            # if result is already filled, push it through as-is
-            # (i.e. binary resource)
-            response.data = result
-
-
-class ZIMServer:
-    def __init__(self, filename, index_file="", template=pkg_resources.resource_filename(__name__, "template.html"),
-                 ip_address="", port=9454, encoding="utf-8", *, auto_delete=False):
+class ZIMClient:
+    def __init__(self, zim_filename, encoding, *, index_file=None, auto_delete=False):
         # create the object to access the ZIM file
-        self._zim_file = ZIMFile(filename, encoding)
-        # get the language of the ZIM file and convert it to ISO639_1 or
-        # default to "en" if unsupported
+        self._zim_file = ZIMFile(zim_filename, encoding)
+        self.encoding = encoding
+
+        # determine the language
         default_iso = to_bytes("eng", encoding=encoding)
         iso639 = self._zim_file.metadata().get("language", default_iso).decode(encoding=encoding, errors="ignore")
-        lang = iso639_3to1.get(iso639, "en")
-        logging.info("A ZIM file in the language " + str(lang) +
-                     " (ISO639-1) was found, containing " + str(len(self._zim_file)) + " articles.")
+        self.language = iso639_3to1.get(iso639, "en")
+        logging.info("ZIM file: language: " + self.language + " (ISO639-1), articles: " + str(len(self._zim_file)))
+
         if not index_file:
-            base = os.path.basename(filename)
+            base = os.path.basename(zim_filename)
             name = os.path.splitext(base)[0]
             # name the index file the same as the zim file with a different extension
-            index_file = os.path.join(os.path.dirname(filename), name + ".idx")
+            index_file = os.path.join(os.path.dirname(zim_filename), name + ".idx")
         logging.info("The index file is determined to be located at " + str(index_file) + ".")
 
         # set this object to a class variable of ZIMRequestHandler
-        ZIMRequestHandler.zim = self._zim_file
-        ZIMRequestHandler.language = lang
         has_xapian_index = False
+        self.search_index = None
         if FOUND_XAPIAN:
             xapian_offset = self._zim_file.get_xapian_offset()
             if xapian_offset is not None:
-                xapian_file = open(filename)
+                xapian_file = open(zim_filename)
                 xapian_file.seek(xapian_offset)
                 db = xapian.Database(xapian_file.fileno())
-                ZIMRequestHandler.search_index = XapianIndex(db, lang, encoding)
+                self.search_index = XapianIndex(db, self.language, encoding)
                 has_xapian_index = True
         if not has_xapian_index:
             fts_index = self._bootstrap_index(index_file, self._zim_file, auto_delete=auto_delete)
             if fts_index:
-                ZIMRequestHandler.search_index = FTSIndex(fts_index, self._zim_file)
-        # set the template to a class variable of ZIMRequestHandler
-        ZIMRequestHandler.template = template
-        # set the encoding to a class variable of ZIMRequestHandler
-        ZIMRequestHandler.encoding = encoding
+                self.search_index = FTSIndex(fts_index, self._zim_file)
 
-        app = falcon.API()
-        main = ZIMRequestHandler()
-        # create a simple sync that forwards all requests; TODO: only allow GET
-        app.add_sink(main.on_get, prefix="/")
-        _address = "localhost" if ip_address == "" else ip_address
-        print("up and running on http://" + _address + ":" + str(port) + "")
-        # start up the HTTP server on the desired port
-        pywsgi.WSGIServer((ip_address, port), app).serve_forever()
+    def get_article_by_url(self, path):
+        # TODO: throw KeyError if it does not exist
+        splits = path.split("/")
+        if len(splits) > 1:
+            namespace = splits[0]
+            url = "/".join(splits[1:])
+        else:
+            namespace = "A"
+            url = path
+        # get the desired article
+        article = self._zim_file.get_article_by_url(namespace, url)
+        if not article:
+            raise KeyError("There is no resource available at '" + str(path) + "' .")
+
+        return article
+
+    @property
+    def main_page(self):
+        return self._zim_file.get_main_page()
 
     def _bootstrap_index(self, index_file, zim_file, *, auto_delete=False):
         # the index_file is a full path; use it to construct a full path for the checksum .chk file
@@ -1231,6 +1084,165 @@ class ZIMServer:
 
     def __exit__(self, *_):
         self._zim_file.close()
+
+
+#####
+# The supporting classes to provide the HTTP server. This includes the template
+# and the actual request handler that uses the ZIM file to retrieve the desired
+# page, images, CSS, etc.
+#####
+
+class ZIMRequestHandler:
+    # store the location of the template file in a class variable
+    template = None
+
+    def __init__(self, client):
+        self.client = client
+
+    def on_get(self, request, response):
+        """
+        Process a HTTP GET request. An object is this class is created whenever
+        an HTTP request is generated. This method is triggered when the request
+        is of any type, typically a GET. This method will redirect the user,
+        based on the request, to the index/search/correct page, or an error
+        page if the resource is unavailable.
+        """
+
+        location = request.relative_uri
+        # replace the escaped characters by their corresponding string values
+        location = unquote(location, self.client.encoding)
+        components = location.split("?")
+        navigation_location = None
+        is_article = True  # assume an article is requested, for now
+        # if trying for the main page ...
+        if location in ["/", "/index.htm", "/index.html", "/main.htm", "/main.html"]:
+            # ... return the main page as the article
+            article = self.client.main_page
+            if article is not None:
+                navigation_location = "main"
+        else:
+            # The location is given as domain.com/namespace/url/parts/ ,
+            # as used in the ZIM link or, alternatively, as domain.com/page.htm
+            splits = location.split("/")
+            path = "/".join(splits[1:])
+
+            # get the desired article
+            try:
+                article = self.client.get_article_by_url(path)
+                # we have an article when the namespace is A (i.e. not a photo, etc.)
+                is_article = (article.namespace == "A")
+            except KeyError:
+                article = None
+                is_article = False
+
+        # from this point forward, "article" refers to an element in the ZIM
+        # database whereas is_article refers to a Boolean to indicate whether
+        # the "article" is a true article, i.e. a webpage
+        success = True  # assume the request succeeded
+        search = False  # assume we do not have a search
+        keywords = ""  # the keywords to search for
+
+        if not article and len(components) <= 1:
+            # there is no article to be retrieved,
+            # and there is no ? in the URI to indicate a search
+            success = False
+        elif len(components) > 1:  # check if URI of the form main?arguments
+            # retrieve the arguments part by popping the top of the sequence
+            arguments = components.pop()
+            # check if arguments starts with ?q= to indicate a proper search
+            if arguments.find("q=") == 0:
+                search = True  # if so, we have a search
+                navigation_location = "search"  # update navigation location
+                # CAREFUL: the str() in the next line convert unicode to ASCII string
+                arguments = re.sub(r"^q=", r"", str(arguments))  # remove the q=
+                keywords = arguments.split("+")  # split all keywords using +
+            else:  # if the required ?q= is not found at the start ...
+                success = False  # not a search, although we thought it was one
+
+        template = Template(filename=ZIMRequestHandler.template)
+        result = body = head = title = ""  # preset all template variables
+        if success:  # if successful, i.e. we found the requested resource
+            response.status = falcon.HTTP_200  # respond with a success code
+            # set the content type based on the article mimetype
+            response.content_type = "text/HTML" if search else article.mimetype
+
+            if not navigation_location:  # check if the article location is set
+                # if not, default to "browse" (non-search, non-main page)
+                navigation_location = "browse"
+
+            if not search:  # if we did not have a search, but a plain article
+                if is_article:
+                    text = article.data  # we have an actual article
+                    # decode its contents into a string using its encoding
+                    text = text.decode(encoding=self.client.encoding)
+                    # retrieve the body from the ZIM article
+                    m = re.search(r"<body.*?>(.*?)</body>", text, re.S)
+                    body = m.group(1) if m else ""
+                    # retrieve the head from the ZIM article
+                    m = re.search(r"<head.*?>(.*?)</head>", text, re.S)
+                    head = m.group(1) if m else ""
+                    # retrieve the title from the ZIM article
+                    m = re.search(r"<title.*?>(.*?)</title>", text, re.S)
+                    title = m.group(1) if m else ""
+                    logging.info("accessing the article: " + title)
+                else:
+                    # just a binary blob, so use it as such
+                    result = article.data
+            else:  # if we did have a search form
+                # show the search query in the title
+                title = "search results for >> " + " ".join(keywords)
+                logging.info("searching for keywords >> " + " ".join(keywords))
+
+                # use the keywords to search the index
+                # q = qp.parse(" ".join(keywords))
+
+                weighted_result = []
+
+                if self.client.search_index:
+                    weighted_result = self.client.search_index.search(" ".join(keywords))
+
+                # present the results irrespective of the index we used
+                if not weighted_result:
+                    # ... let the user know there are no results
+                    body = "no results found for: " + " <i>" + " ".join(keywords) + "</i>"
+                else:
+                    for entry in weighted_result:
+                        logging.info(str(entry.score) + ": " + str(entry))
+                        body += "<a href=\"{}\">{}</a><br />".format(entry.url, entry.title)
+
+        else:  # if we did not achieve success
+            response.status = falcon.HTTP_404
+            response.content_type = "text/HTML"
+            title = "Page 404"
+            body = "requested resource not found"
+
+        if not result:  # if the result hasn't been prefilled ...
+            result = template.render(location=navigation_location, body=body,
+                                     head=head, title=title)  # render template
+            response.data = to_bytes(result, encoding=self.client.encoding)
+        else:
+            # if result is already filled, push it through as-is
+            # (i.e. binary resource)
+            response.data = result
+
+
+class ZIMServer:
+    def __init__(self, filename, index_file="", template=pkg_resources.resource_filename(__name__, "template.html"),
+                 ip_address="", port=9454, encoding="utf-8", *, auto_delete=False):
+        # create the object to access the ZIM file
+        self.client = ZIMClient(filename, encoding, index_file=index_file, auto_delete=auto_delete)
+
+        # set the template to a class variable of ZIMRequestHandler
+        ZIMRequestHandler.template = template
+
+        app = falcon.API()
+        main = ZIMRequestHandler(self.client)
+        # create a simple sync that forwards all requests; TODO: only allow GET
+        app.add_sink(main.on_get, prefix="/")
+        _address = "localhost" if ip_address == "" else ip_address
+        print("up and running on http://" + _address + ":" + str(port) + "")
+        # start up the HTTP server on the desired port
+        pywsgi.WSGIServer((ip_address, port), app).serve_forever()
 
 # to start a ZIM server using ZIMply,
 # all you need to provide is the location of the ZIM file:
