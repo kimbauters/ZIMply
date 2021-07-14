@@ -1104,7 +1104,7 @@ class ZIMServer:
                 except IOError:
                     print("... unable to delete the files.")
                     return None
-            else:
+            elif not verified and not auto_delete:
                 return None
 
         # return an open connection to the SQLite database
