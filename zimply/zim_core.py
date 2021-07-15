@@ -992,7 +992,7 @@ class ZIMClient:
                 has_xapian_index = True
         if not has_xapian_index:
             result = mp.Queue()
-            process = CreateFTSProcess(result, index_file, copy.copy(self._zim_file), auto_delete=True)
+            process = CreateFTSProcess(result, index_file, copy.copy(self._zim_file), auto_delete=auto_delete)
             process.start()
             fts_index = result.get()
             if fts_index:
