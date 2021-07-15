@@ -735,7 +735,7 @@ class BM25:
         :param query: a tuple containing the words that we're looking for.
         :param corpus: a list of strings, each string corresponding to
                        one result returned based on the query.
-        :return: a list of scores (higher is better),
+        :return: a list of scores (lower is better),
                  in the same order as the documents in the corpus.
         """
 
@@ -780,7 +780,7 @@ class BM25:
             # add this score to the result list
             result.append(total_score)
 
-        return result
+        return [-1 * item for item in result]  # "flip" all results so that lower scores are better (matches sqlite)
 
 
 SearchResult = namedtuple("SearchResult", ["score", "index", "namespace", "url", "title"])  # a quintuple
@@ -816,9 +816,10 @@ class SearchIndex(object):
 
 
 class FTSIndex(SearchIndex):
-    def __init__(self, db, zim_file):
+    def __init__(self, db, level, zim_file):
         super(FTSIndex, self).__init__()
         self.db = db
+        self.level = level
         self.zim = zim_file
         self.bm25 = BM25()
 
@@ -828,9 +829,16 @@ class FTSIndex(SearchIndex):
 
     def search(self, query, *, start=0, end=-1, separator=" "):
         keywords = query.split(separator)
-        search_for = "* ".join(keywords) + "*"
+        term = "* ".join(keywords) + "*"
         cursor = self.db.cursor()
-        cursor.execute("SELECT rowid FROM docs WHERE title MATCH ?", (search_for,))
+
+        # USING FTS5 we can perform pagination as part of the SQL query
+        if self.level < 5:
+            cursor.execute("SELECT rowid FROM docs WHERE title MATCH ?", (term,))
+        else:
+            offset = " OFFSET " + str(start) if end != 0 and end >= start else ""
+            limit = "" if end == -1 or not offset else " LIMIT " + str(max(0, end - start + 1))
+            cursor.execute("SELECT rowid, rank FROM docs WHERE title MATCH ? ORDER BY rank" + limit + offset, (term,))
 
         results = cursor.fetchall()
         response = []
@@ -838,9 +846,12 @@ class FTSIndex(SearchIndex):
         if results:
             entries = []
             redirects = []
+            scores = []
             for row in results:  # ... iterate over all the results
                 # read the directory entry by index (rather than URL)
                 entry = self.zim.read_directory_entry_by_index(row[0])
+                if self.level >= 5:
+                    scores.append(float(row[1]))
                 # add the full url to the entry
                 if entry.get("redirectIndex"):
                     redirects.append(entry)
@@ -852,17 +863,18 @@ class FTSIndex(SearchIndex):
 
             entries = list(chain(entries, redirects))
             titles = [entry["title"] for entry in entries]
-            scores = self.bm25.calculate_scores(keywords, titles)
-            weighted_result = sorted(zip(scores, entries), reverse=True, key=lambda x: x[0])
+            # calculate the scores or provide identical scores for all recors
+            if not self.level >= 5:
+                scores = self.bm25.calculate_scores(keywords, titles)
+            weighted_result = sorted(zip(scores, entries), reverse=False, key=lambda x: x[0])
             response = [SearchResult(item[0], item[1]["index"], item[1]["namespace"],
                                      item[1]["url"], item[1]["title"]) for item in weighted_result]
-        # NOTE: pagination is only a convenience feature - all results need to be fetched to calculate BM25 scores
-        # TODO: FTS5 comes with a built-in BM25 score so does pagination can be made faster using ORDER BY bm25(title)
-        # NOTE: the BM25 score with FTS5 has a -1 modifier so lower scores are better
-        if end == -1:
-            return response[start:]
+
+        if self.level >= 5:
+            return response
         else:
-            return response[start:end + 1]
+            # NOTE: pagination is a convenience feature for FTS3/4 - all results are fetched to calculate BM25 scores
+            return response[start:] if end == -1 else response[start:end + 1]
 
     def get_search_results_count(self, query, *, separator=" "):
         keywords = query.split(separator)
@@ -969,7 +981,7 @@ class ZIMClient:
         if not has_xapian_index:
             fts_index = self._bootstrap_index(index_file, self._zim_file, auto_delete=auto_delete)
             if fts_index:
-                self.search_index = FTSIndex(fts_index, self._zim_file)
+                self.search_index = FTSIndex(fts_index, self._highest_fts_level(), self._zim_file)
 
     def get_article(self, path):
         splits = path.split("/")
