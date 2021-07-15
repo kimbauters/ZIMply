@@ -184,7 +184,6 @@ class ZIMRequestHandler:
                     body = "no results found for: " + " <i>" + " ".join(keywords) + "</i>"
                 else:
                     for entry in weighted_result:
-                        logging.info(str(entry.score) + ": " + str(entry))
                         body += "<a href=\"{}\">{}</a><br />".format(entry.url, entry.title)
 
         else:  # if we did not achieve success

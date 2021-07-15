@@ -37,7 +37,6 @@
 from __future__ import division
 from __future__ import print_function
 
-import copy
 import io
 import logging
 import multiprocessing as mp
@@ -840,6 +839,7 @@ class FTSIndex(SearchIndex):
         return True
 
     def search(self, query, *, start=0, end=-1, separator=" "):
+        logging.info("Searching for the terms '" + query + "' using FTS.")
         keywords = query.split(separator)
         term = "* ".join(keywords) + "*"
         cursor = self.db.cursor()
@@ -870,7 +870,6 @@ class FTSIndex(SearchIndex):
                 else:
                     entries.append(entry)
             indexes = set(entry["index"] for entry in entries)
-            logging.info("indexes found: " + str(indexes))
             redirects = [entry for entry in redirects if entry["redirectIndex"] not in indexes]
 
             entries = list(chain(entries, redirects))
@@ -881,6 +880,8 @@ class FTSIndex(SearchIndex):
             weighted_result = sorted(zip(scores, entries), reverse=False, key=lambda x: x[0])
             response = [SearchResult(item[0], item[1]["index"], item[1]["namespace"],
                                      item[1]["url"], item[1]["title"]) for item in weighted_result]
+
+        logging.info("Found " + str(len(response)) + " search results.")
 
         if self.level >= 5:
             return response
@@ -992,11 +993,11 @@ class ZIMClient:
                 has_xapian_index = True
         if not has_xapian_index:
             result = mp.Queue()
-            process = CreateFTSProcess(result, index_file, copy.copy(self._zim_file), auto_delete=auto_delete)
+            process = CreateFTSProcess(result, index_file, ZIMFile(zim_filename, encoding), auto_delete=auto_delete)
             process.start()
             fts_index = result.get()
             if fts_index:
-                print("Search index available; continuing.")
+                logging.info("Search index available; continuing.")
                 self.search_index = FTSIndex(sqlite3.connect(fts_index), process.level, self._zim_file)
 
     def get_article(self, path):
@@ -1062,7 +1063,7 @@ class CreateFTSProcess(mp.Process):
         return sha256(message).hexdigest()
 
     def safe_run(self):
-        update_every = 1000
+        update_every = 10000
 
         # the index_file is a full path; use it to construct a full path for the checksum .chk file
         base = os.path.basename(self.index_file)
@@ -1079,7 +1080,7 @@ class CreateFTSProcess(mp.Process):
         # retrieve the maximum FTS level supported by SQLite
         level = self.level
         if level is None:
-            print("No FTS supported - cannot create search index.")
+            logging.info("No FTS supported - cannot create search index.")
             self.connect_queue.put(None)
         logging.info("Support found for FTS" + str(level) + ".")
 
@@ -1095,7 +1096,7 @@ class CreateFTSProcess(mp.Process):
                 if len(lines) >= 1:
                     checksum_valid = lines[0] == checksum
                     if checksum_valid is False:
-                        print("The checksum of the search index does not match the opened ZIM file.")
+                        logging.info("The checksum of the search index does not match the opened ZIM file.")
                 if len(lines) >= 2:
                     continuation = lines[1]
                     splits = continuation.split(" ")
@@ -1112,8 +1113,8 @@ class CreateFTSProcess(mp.Process):
             if checksum_valid is None:
                 logging.info("No index was found at " + str(self.index_file) + ", so now creating the index.")
             else:
-                print("Continuing the creation of the index starting from ID #" + str(start_idx) + ".")
-            print("The index is being created, this can take quite some time! - " + time.strftime("%X %x"))
+                logging.info("Continuing the creation of the index starting from ID #" + str(start_idx) + ".")
+            logging.info("The index is being created, this can take quite some time! - " + time.strftime("%X %x"))
 
             created_checksum = False
             created_search_index = False
@@ -1153,26 +1154,27 @@ class CreateFTSProcess(mp.Process):
                         with open(checksum_file, "w") as file:
                             file.write(checksum + "\n")
                             file.write(str(idx) + " " + self._get_continuation_checksum(idx, checksum))
+                        logging.info("  ... completed intermediate save of index under creation.")
                         unsaved = 0
                 # once all articles are added, commit the changes to the database
                 db.commit()
                 with open(checksum_file, "w") as file:
                     file.write(checksum)
 
-                print("Index creation complete - " + time.strftime("%X %x"))
+                logging.info("Index creation complete - " + time.strftime("%X %x"))
                 db.close()
             except (sqlite3.Error, IOError) as error:
                 if isinstance(error, sqlite3.Error):
-                    print("Unable to create the search index - unexpected SQLite error.")
+                    logging.info("Unable to create the search index - unexpected SQLite error.")
                 else:
-                    print("Unable to write the checksum or the search index.")
+                    logging.info("Unable to write the checksum or the search index.")
                 if created_checksum:
                     os.remove(checksum_file)
                 if created_search_index:
                     os.remove(self.index_file)
                 self.connect_queue.put(None)
         elif checksum_valid is False and self.auto_delete:
-            print("... trying to delete the search index so it can be updated.")
+            logging.info("... trying to delete the search index so it can be updated.")
             try:
                 # first delete the checksum file
                 # this prevents the need to recreate the index if the checksum file cannot be deleted
@@ -1181,7 +1183,7 @@ class CreateFTSProcess(mp.Process):
                 os.remove(self.index_file)
                 self.safe_run()
             except IOError:
-                print("... unable to delete the files.")
+                logging.info("... unable to delete the files.")
                 self.connect_queue.put(None)
         elif checksum_valid is True:
             logging.info("all data checks out, sending back index file")
