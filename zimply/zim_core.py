@@ -555,15 +555,14 @@ class ZIMFile:
             return None, None
         else:
             front = middle = 0
-            end = len(self)
+            end = self.header_fields["articleCount"]
             title = full_url(namespace, url)
-            logging.debug("performing binary search with boundaries " +
-                          str(front) + " - " + str(end))
+            logging.debug("performing binary search with boundaries " + str(front) + " - " + str(end))
             found = False
             # continue as long as the boundaries don't cross and
             # we haven't found it
             while front <= end and not found:
-                middle = floor((front + end) / 2)  # determine the middle index
+                middle = (front + end) // 2  # determine the middle index
                 entry = self.read_directory_entry_by_index(middle)
                 logging.debug("checking " + entry["url"])
                 found_title = full_url(entry["namespace"], entry["url"])
