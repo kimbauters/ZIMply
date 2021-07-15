@@ -231,4 +231,4 @@ class ZIMServer:
 
 # all arguments can also be named,
 # so you can also choose to simply change the port:
-# server = ZIMServer("../wiki.zim", port=8080)
+server = ZIMServer("../wiki2.zim", port=8080)

@@ -37,8 +37,10 @@
 from __future__ import division
 from __future__ import print_function
 
+import copy
 import io
 import logging
+import multiprocessing as mp
 import os
 import random
 import sqlite3
@@ -48,6 +50,7 @@ from functools import partial
 from hashlib import sha256
 from itertools import chain
 from struct import Struct, pack, unpack, error as struct_error
+from time import sleep
 
 import zstandard
 from math import floor, pow, log
@@ -978,9 +981,13 @@ class ZIMClient:
                 self.search_index = XapianIndex(db, self.language, encoding)
                 has_xapian_index = True
         if not has_xapian_index:
-            fts_index = self._bootstrap_index(index_file, self._zim_file, auto_delete=auto_delete)
+            result = mp.Queue()
+            process = CreateFTSProcess(result, index_file, copy.copy(self._zim_file), auto_delete=True)
+            process.start()
+            fts_index = result.get()
             if fts_index:
-                self.search_index = FTSIndex(fts_index, self._highest_fts_level(), self._zim_file)
+                print("Search index available or being created. Continuing.")
+                self.search_index = FTSIndex(sqlite3.connect(fts_index), process.level, self._zim_file)
 
     def get_article(self, path):
         splits = path.split("/")
@@ -1019,12 +1026,32 @@ class ZIMClient:
     def main_page(self):
         return self._zim_file.get_main_page()
 
-    def _bootstrap_index(self, index_file, zim_file, *, auto_delete=False):
+    def __exit__(self, *_):
+        self._zim_file.close()
+
+
+class CreateFTSProcess(mp.Process):
+    def __init__(self, connect_queue: mp.Queue, index_file: str, zim_file: ZIMFile, *, auto_delete=False):
+        super(CreateFTSProcess, self).__init__()
+        self.connect_queue = connect_queue
+        self.index_file = index_file
+        self.zim_file = zim_file
+        self.auto_delete = auto_delete
+        self.level = self._highest_fts_level()
+
+    def run(self) -> None:
+        try:
+            self.safe_run()
+        except Exception as exception:
+            raise exception
+        return
+
+    def safe_run(self) -> None:
         # the index_file is a full path; use it to construct a full path for the checksum .chk file
-        base = os.path.basename(index_file)
+        base = os.path.basename(self.index_file)
         name = os.path.splitext(base)[0]
         # name the checksum file the same as the index file with a different extension
-        checksum_file = os.path.join(os.path.dirname(index_file), name + ".chk")
+        checksum_file = os.path.join(os.path.dirname(self.index_file), name + ".chk")
 
         # there are a number of steps to walk through:
         #  - if the index exists, then calculate the checksum and verify it with the checksum file
@@ -1033,16 +1060,16 @@ class ZIMClient:
         #  - if the index does not exist create it as well as the checksum file
 
         # retrieve the maximum FTS level supported by SQLite
-        level = self._highest_fts_level()
+        level = self.level
         if level is None:
             print("No FTS supported - cannot create search index.")
-            return None
+            self.connect_queue.put(None)
         logging.info("Support found for FTS" + str(level) + ".")
 
-        checksum = zim_file.checksum({"fts": level})
+        checksum = self.zim_file.checksum({"fts": level})
 
-        if not os.path.exists(index_file):  # check whether the index exists
-            logging.info("No index was found at " + str(index_file) + ", so now creating the index.")
+        if not os.path.exists(self.index_file):  # check whether the index exists
+            logging.info("No index was found at " + str(self.index_file) + ", so now creating the index.")
             print("Please wait as the index is created, this can take quite some time! - " + time.strftime("%X %x"))
 
             created_checksum = False
@@ -1052,7 +1079,7 @@ class ZIMClient:
                     file.write(checksum)
                     created_checksum = True
 
-                db = sqlite3.connect(index_file)
+                db = sqlite3.connect(self.index_file)
                 created_search_index = True
                 cursor = db.cursor()
                 # limit memory usage to 64MB
@@ -1061,8 +1088,13 @@ class ZIMClient:
                 # create a content-less virtual table using full-text search (FTS) and the porter tokenizer
                 fts = "fts" + str(level)
                 cursor.execute("CREATE VIRTUAL TABLE docs USING " + str(fts) + "(content='', title, tokenize=porter);")
+                db.commit()
                 # get an iterator to access all the articles
-                articles = iter(self._zim_file)
+                articles = iter(self.zim_file)
+
+                logging.info("sending data in queue after table creation")
+                self.connect_queue.put(self.index_file)
+                sleep(0.05)  # give the queue a bit of time to pick up on the data before continuing
 
                 for url, title, idx in articles:  # retrieve articles one by one
                     cursor.execute("INSERT INTO docs(rowid, title) VALUES (?, ?)", (idx, title))  # and add them
@@ -1079,8 +1111,8 @@ class ZIMClient:
                 if created_checksum:
                     os.remove(checksum_file)
                 if created_search_index:
-                    os.remove(index_file)
-                return None
+                    os.remove(self.index_file)
+                self.connect_queue.put(None)
         else:
             # verify that the checksum file exists, and that it holds the correct checksum value
             verified = True
@@ -1097,23 +1129,24 @@ class ZIMClient:
             except IOError:
                 pass
 
-            if not verified and auto_delete:
+            if not verified and self.auto_delete:
                 print("... trying to delete the search index so it can be updated.")
                 try:
                     # first delete the checksum file
                     # this prevents the need to recreate the index if the checksum file cannot be deleted
                     # and the correct checksum file can be recovered from its corrupted state
                     os.remove(checksum_file)
-                    os.remove(index_file)
-                    return self._bootstrap_index(index_file, zim_file)
+                    os.remove(self.index_file)
+                    self.safe_run()
                 except IOError:
                     print("... unable to delete the files.")
-                    return None
-            elif not verified and not auto_delete:
-                return None
+                    self.connect_queue.put(None)
+            elif not verified and not self.auto_delete:
+                self.connect_queue.put(None)
 
+        logging.info("all data checks out, sending back index file")
         # return an open connection to the SQLite database
-        return sqlite3.connect(index_file)
+        self.connect_queue.put(self.index_file)
 
     @staticmethod
     def _highest_fts_level():
@@ -1141,6 +1174,3 @@ class ZIMClient:
         if verify_fts_level(3) is True:
             return 3
         return None
-
-    def __exit__(self, *_):
-        self._zim_file.close()
