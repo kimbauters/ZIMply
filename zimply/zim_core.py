@@ -417,6 +417,26 @@ def binary_search(func, item, front, end):
     return middle if found else None
 
 
+class ZIMFileIterator(object):
+    def __init__(self, zim_file, *, start_from=0):
+        self._zim_file = zim_file
+        self._namespace = self._zim_file.get_namespace_range("A")
+        self._idx = max(self._namespace.start, start_from)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._idx <= self._namespace.end:
+            idx = self._idx
+            entry = self._zim_file.read_directory_entry_by_index(idx)
+            entry["fullUrl"] = full_url(entry["namespace"], entry["url"])
+            self._idx += 1
+            return entry["fullUrl"], entry["title"], idx
+        else:
+            raise StopIteration
+
+
 class ZIMFile:
     """
     The main class to access a ZIM file.
@@ -634,21 +654,11 @@ class ZIMFile:
     def __len__(self):  # retrieve the number of articles in the ZIM file
         return self.get_namespace_range("A").count
 
+    def get_iterator(self, *, start_from=0):
+        return ZIMFileIterator(self, start_from=start_from)
+
     def __iter__(self):
-        """
-        Create an iterator generator to retrieve all articles in the ZIM file.
-        :return: a yielded entry of an article, containing its full URL,
-                  its title, and the index of the article
-        """
-
-        article_namespace = self.get_namespace_range("A")
-
-        if article_namespace.start is not None and article_namespace.end is not None:
-            for idx in range(article_namespace.start, article_namespace.end + 1):
-                # get the Directory Entry
-                entry = self.read_directory_entry_by_index(idx)
-                entry["fullUrl"] = full_url(entry["namespace"], entry["url"])
-                yield entry["fullUrl"], entry["title"], idx
+        return ZIMFileIterator(self)
 
     @lru_cache(maxsize=32)  # provide an LRU cache for this object
     def get_namespace_range(self, namespace):
@@ -986,7 +996,7 @@ class ZIMClient:
             process.start()
             fts_index = result.get()
             if fts_index:
-                print("Search index available or being created. Continuing.")
+                print("Search index available; continuing.")
                 self.search_index = FTSIndex(sqlite3.connect(fts_index), process.level, self._zim_file)
 
     def get_article(self, path):
@@ -1031,7 +1041,7 @@ class ZIMClient:
 
 
 class CreateFTSProcess(mp.Process):
-    def __init__(self, connect_queue: mp.Queue, index_file: str, zim_file: ZIMFile, *, auto_delete=False):
+    def __init__(self, connect_queue, index_file, zim_file, *, auto_delete=False):
         super(CreateFTSProcess, self).__init__()
         self.connect_queue = connect_queue
         self.index_file = index_file
@@ -1039,14 +1049,21 @@ class CreateFTSProcess(mp.Process):
         self.auto_delete = auto_delete
         self.level = self._highest_fts_level()
 
-    def run(self) -> None:
+    def run(self):
         try:
             self.safe_run()
         except Exception as exception:
             raise exception
         return
 
-    def safe_run(self) -> None:
+    @staticmethod
+    def _get_continuation_checksum(idx, checksum):
+        message = (str(idx) + "+" + checksum).encode("ascii")
+        return sha256(message).hexdigest()
+
+    def safe_run(self):
+        update_every = 1000
+
         # the index_file is a full path; use it to construct a full path for the checksum .chk file
         base = os.path.basename(self.index_file)
         name = os.path.splitext(base)[0]
@@ -1068,15 +1085,44 @@ class CreateFTSProcess(mp.Process):
 
         checksum = self.zim_file.checksum({"fts": level})
 
-        if not os.path.exists(self.index_file):  # check whether the index exists
-            logging.info("No index was found at " + str(self.index_file) + ", so now creating the index.")
-            print("Please wait as the index is created, this can take quite some time! - " + time.strftime("%X %x"))
+        checksum_valid = None  # None if not found, True if verified, False if incorrect
+        start_idx = -1
+
+        if os.path.isfile(checksum_file):
+            checksum_valid = False  # as long as the file exists we must assume that the checksum is tampered with
+            with open(checksum_file, "r") as file:
+                lines = file.readlines()
+                if len(lines) >= 1:
+                    checksum_valid = lines[0] == checksum
+                    if checksum_valid is False:
+                        print("The checksum of the search index does not match the opened ZIM file.")
+                if len(lines) >= 2:
+                    continuation = lines[1]
+                    splits = continuation.split(" ")
+                    if len(splits) == 2:
+                        try:
+                            idx = int(splits[0])
+                            cont_checksum = splits[1]
+                            if cont_checksum == self._get_continuation_checksum(idx, checksum):
+                                start_idx = idx
+                        except ValueError:
+                            pass
+
+        if checksum_valid is None or (checksum_valid is True and start_idx > -1):
+            if checksum_valid is None:
+                logging.info("No index was found at " + str(self.index_file) + ", so now creating the index.")
+            else:
+                print("Continuing the creation of the index starting from ID #" + str(start_idx) + ".")
+            print("The index is being created, this can take quite some time! - " + time.strftime("%X %x"))
 
             created_checksum = False
             created_search_index = False
             try:
+                start_idx = max(0, start_idx)
+
                 with open(checksum_file, "w") as file:
-                    file.write(checksum)
+                    file.write(checksum + "\n")
+                    file.write(str(start_idx) + " " + self._get_continuation_checksum(start_idx, checksum))
                     created_checksum = True
 
                 db = sqlite3.connect(self.index_file)
@@ -1087,21 +1133,33 @@ class CreateFTSProcess(mp.Process):
 
                 # create a content-less virtual table using full-text search (FTS) and the porter tokenizer
                 fts = "fts" + str(level)
-                cursor.execute("CREATE VIRTUAL TABLE docs USING " + str(fts) + "(content='', title, tokenize=porter);")
+                cursor.execute("CREATE VIRTUAL TABLE IF NOT EXISTS docs USING " +
+                               str(fts) + "(content='', title, tokenize=porter);")
                 db.commit()
                 # get an iterator to access all the articles
-                articles = iter(self.zim_file)
 
                 logging.info("sending data in queue after table creation")
                 self.connect_queue.put(self.index_file)
                 sleep(0.05)  # give the queue a bit of time to pick up on the data before continuing
 
-                for url, title, idx in articles:  # retrieve articles one by one
-                    cursor.execute("INSERT INTO docs(rowid, title) VALUES (?, ?)", (idx, title))  # and add them
+                iterator = self.zim_file.get_iterator(start_from=start_idx)
+
+                unsaved = 0
+                for url, title, idx in iterator:  # retrieve articles one by one
+                    cursor.execute("INSERT OR REPLACE INTO docs(rowid, title) VALUES (?, ?)", (idx, title))
+                    unsaved += 1
+                    if unsaved >= update_every:
+                        db.commit()
+                        with open(checksum_file, "w") as file:
+                            file.write(checksum + "\n")
+                            file.write(str(idx) + " " + self._get_continuation_checksum(idx, checksum))
+                        unsaved = 0
                 # once all articles are added, commit the changes to the database
                 db.commit()
+                with open(checksum_file, "w") as file:
+                    file.write(checksum)
 
-                print("Index created, continuing - " + time.strftime("%X %x"))
+                print("Index creation complete - " + time.strftime("%X %x"))
                 db.close()
             except (sqlite3.Error, IOError) as error:
                 if isinstance(error, sqlite3.Error):
@@ -1113,40 +1171,23 @@ class CreateFTSProcess(mp.Process):
                 if created_search_index:
                     os.remove(self.index_file)
                 self.connect_queue.put(None)
-        else:
-            # verify that the checksum file exists, and that it holds the correct checksum value
-            verified = True
+        elif checksum_valid is False and self.auto_delete:
+            print("... trying to delete the search index so it can be updated.")
             try:
-                if os.path.isfile(checksum_file):
-                    with open(checksum_file, "r") as file:
-                        line = file.readline()
-                        if line != checksum:
-                            print("The checksum of the search index does not match the opened ZIM file.")
-                            verified = False
-                else:
-                    print("No checksum file found.")
-                    verified = False
+                # first delete the checksum file
+                # this prevents the need to recreate the index if the checksum file cannot be deleted
+                # and the correct checksum file can be recovered from its corrupted state
+                os.remove(checksum_file)
+                os.remove(self.index_file)
+                self.safe_run()
             except IOError:
-                pass
-
-            if not verified and self.auto_delete:
-                print("... trying to delete the search index so it can be updated.")
-                try:
-                    # first delete the checksum file
-                    # this prevents the need to recreate the index if the checksum file cannot be deleted
-                    # and the correct checksum file can be recovered from its corrupted state
-                    os.remove(checksum_file)
-                    os.remove(self.index_file)
-                    self.safe_run()
-                except IOError:
-                    print("... unable to delete the files.")
-                    self.connect_queue.put(None)
-            elif not verified and not self.auto_delete:
+                print("... unable to delete the files.")
                 self.connect_queue.put(None)
-
-        logging.info("all data checks out, sending back index file")
-        # return an open connection to the SQLite database
-        self.connect_queue.put(self.index_file)
+        elif checksum_valid is True:
+            logging.info("all data checks out, sending back index file")
+            self.connect_queue.put(self.index_file)
+        else:
+            self.connect_queue.put(None)
 
     @staticmethod
     def _highest_fts_level():
