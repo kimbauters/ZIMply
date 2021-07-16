@@ -68,6 +68,7 @@ except ImportError:
 # page, images, CSS, etc.
 #####
 
+
 class ZIMRequestHandler:
     # store the location of the template file in a class variable
     template = None
