@@ -417,7 +417,7 @@ def binary_search(func, item, front, end):
 
 
 class ZIMFileIterator(object):
-    def __init__(self, zim_file, *, start_from=0):
+    def __init__(self, zim_file, start_from=0):
         self._zim_file = zim_file
         self._namespace = self._zim_file.get_namespace_range("A")
         self._idx = max(self._namespace.start, start_from)
@@ -434,6 +434,9 @@ class ZIMFileIterator(object):
             return entry["fullUrl"], entry["title"], idx
         else:
             raise StopIteration
+
+    def next(self):
+        return self.__next__()
 
 
 class ZIMFile:
@@ -653,7 +656,7 @@ class ZIMFile:
     def __len__(self):  # retrieve the number of articles in the ZIM file
         return self.get_namespace_range("A").count
 
-    def get_iterator(self, *, start_from=0):
+    def get_iterator(self, start_from=0):
         return ZIMFileIterator(self, start_from=start_from)
 
     def __iter__(self):
@@ -805,7 +808,7 @@ class SearchIndex(object):
         """
         return False
 
-    def search(self, query, *, start=0, end=-1, separator=" "):
+    def search(self, query, start=0, end=-1, separator=" "):
         """
         Search the index for the given query. Optional arguments allow for pagination and non-standard query formats.
         :param query: the query to search for.
@@ -816,7 +819,7 @@ class SearchIndex(object):
         """
         return []
 
-    def get_search_results_count(self, query, *, separator=" "):
+    def get_search_results_count(self, query, separator=" "):
         """
         Get the number of search results. Optional argument allows for non-standard query formats.
         :param query: the query to search for.
@@ -838,7 +841,7 @@ class FTSIndex(SearchIndex):
     def has_search(self):
         return True
 
-    def search(self, query, *, start=0, end=-1, separator=" "):
+    def search(self, query, start=0, end=-1, separator=" "):
         logging.info("Searching for the terms '" + query + "' using FTS.")
         keywords = query.split(separator)
         term = "* ".join(keywords) + "*"
@@ -889,7 +892,7 @@ class FTSIndex(SearchIndex):
             # NOTE: pagination is a convenience feature for FTS3/4 - all results are fetched to calculate BM25 scores
             return response[start:] if end == -1 else response[start:end + 1]
 
-    def get_search_results_count(self, query, *, separator=" "):
+    def get_search_results_count(self, query, separator=" "):
         keywords = query.split(separator)
         search_for = "* ".join(keywords) + "*"
         cursor = self.db.cursor()
@@ -909,7 +912,7 @@ class XapianIndex(SearchIndex):
     def has_search(self):
         return True
 
-    def search(self, query, *, start=0, end=-1, separator=" "):
+    def search(self, query, start=0, end=-1, separator=" "):
         parser = xapian.QueryParser()
         parser.set_stemmer(xapian.Stem(self.language))
         # NOTE: the STEM_SOME strategy is not working as expected
@@ -945,7 +948,7 @@ class XapianIndex(SearchIndex):
             entries.append(SearchResult(match.weight, idx, namespace, url, title))
         return sorted(entries, reverse=True, key=lambda x: x.score)
 
-    def get_search_results_count(self, query, *, separator=" "):
+    def get_search_results_count(self, query, separator=" "):
         parser = xapian.QueryParser()
         parser.set_stemmer(xapian.Stem(self.language))
         # NOTE: the STEM_SOME strategy is not working as expected
@@ -962,7 +965,7 @@ class XapianIndex(SearchIndex):
 
 
 class ZIMClient:
-    def __init__(self, zim_filename, encoding, *, index_file=None, auto_delete=False):
+    def __init__(self, zim_filename, encoding, index_file=None, auto_delete=False):
         # create the object to access the ZIM file
         self._zim_file = ZIMFile(zim_filename, encoding)
         self.encoding = encoding
@@ -1027,10 +1030,10 @@ class ZIMClient:
     def has_search(self):
         return self.search_index.has_search
 
-    def search(self, query, *, start, end, separator=" "):
+    def search(self, query, start, end, separator=" "):
         return self.search_index.search(query, start=start, end=end, separator=separator)
 
-    def get_search_results_count(self, query, *, separator=" "):
+    def get_search_results_count(self, query, separator=" "):
         return self.get_search_results_count(query, separator=separator)
 
     @property
@@ -1042,7 +1045,7 @@ class ZIMClient:
 
 
 class CreateFTSProcess(mp.Process):
-    def __init__(self, connect_queue, index_file, zim_file, *, auto_delete=False):
+    def __init__(self, connect_queue, index_file, zim_file, auto_delete=False):
         super(CreateFTSProcess, self).__init__()
         self.connect_queue = connect_queue
         self.index_file = index_file

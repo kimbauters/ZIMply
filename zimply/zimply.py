@@ -204,7 +204,7 @@ class ZIMRequestHandler:
 
 class ZIMServer:
     def __init__(self, filename, index_file="", template=pkg_resources.resource_filename(__name__, "template.html"),
-                 ip_address="", port=9454, encoding="utf-8", *, auto_delete=False):
+                 ip_address="", port=9454, encoding="utf-8", auto_delete=False):
         # create the object to access the ZIM file
         self.client = ZIMClient(filename, encoding, index_file=index_file, auto_delete=auto_delete)
 
