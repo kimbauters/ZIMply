@@ -1,4 +1,4 @@
-# Copyright (c) 2016, Kim Bauters
+# Copyright (c) 2016-2021, Kim Bauters, Endless OS Foundation
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
