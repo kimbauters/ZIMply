@@ -91,10 +91,12 @@ except ImportError:
 
 # custom function to convert to bytes that is compatible both with Python 3.4+ and Python 2.7
 def to_bytes(data, encoding):
-    if IS_PY3:
+    if isinstance(data, bytes):
+        return data
+    elif IS_PY3:
         return bytes(data, encoding)
     else:
-        return data if isinstance(data, bytes) else data.encode(encoding)
+        return data.encode(encoding)
 
 
 verbose = False
