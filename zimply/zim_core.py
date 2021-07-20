@@ -111,7 +111,7 @@ logging.basicConfig(filename="zimply.log", filemode="w",
 
 ZERO = pack("B", 0)  # defined for zero terminated fields
 Field = namedtuple("Field", ["format", "field_name"])  # a tuple
-Article = namedtuple("Article", ["data", "namespace", "mimetype"])  # a triple
+Article = namedtuple("Article", ["url", "full_url", "title", "data", "namespace", "mimetype", "redirect_to_url"])
 Namespace = namedtuple("Namespace", ["count", "start", "end", "namespace"])  # a quadruple
 
 iso639_3to1 = {"ara": "ar", "dan": "da", "nld": "nl", "eng": "en",
@@ -549,22 +549,32 @@ class ZIMFile:
         if entry is not None:
             # check if we have a Redirect Entry
             if "redirectIndex" in entry.keys():
-                # if we follow up on redirects, return the article it is
-                # pointing to
+                # if we follow up on redirects, return the article it is pointing to following all redirects
                 if follow_redirect:
                     logging.debug("redirect to " + str(entry["redirectIndex"]))
                     return self._get_article_by_index(entry["redirectIndex"], follow_redirect, return_offset)
-                # otherwise, simply return no data
-                # and provide the redirect index as the metadata.
+                # otherwise, (1) return no data, (2) provide the redirect index as the metadata,
+                #            and (3) provide the full URL this entry is redirecting to
                 else:
-                    return None if return_offset else Article(None, entry["namespace"], entry["redirectIndex"])
+                    next_link = self._get_article_by_index(entry["redirectIndex"], False, return_offset)
+                    return None if return_offset else Article(entry["url"],
+                                                              full_url(entry["namespace"], entry["url"]),
+                                                              # by ZIM definition the URL is the alternative for a title
+                                                              entry["title"] if entry["title"] else entry["url"],
+                                                              None, entry["namespace"], entry["redirectIndex"],
+                                                              next_link.full_url)
             else:  # otherwise, we have an Article Entry
                 # get the data and return the Article
                 result = self._read_blob(entry["clusterNumber"], entry["blobNumber"], return_offset)
                 if return_offset:
                     return result
                 else:  # we received the blob back; use it to create an Article object
-                    return Article(result, entry["namespace"], self.mimetype_list[entry["mimetype"]])
+                    return Article(entry["url"],
+                                   full_url(entry["namespace"], entry["url"]),
+                                   # by ZIM definition the URL is the alternative for a title
+                                   entry["title"] if entry["title"] else entry["url"],
+                                   result, entry["namespace"], self.mimetype_list[entry["mimetype"]],
+                                   None)
         else:
             return None
 
@@ -1005,7 +1015,7 @@ class ZIMClient:
                 logging.info("Search index available; continuing.")
                 self.search_index = FTSIndex(sqlite3.connect(fts_index), process.level, self._zim_file)
 
-    def get_article(self, path):
+    def get_article(self, path, follow_redirect=True):
         splits = path.split("/")
         if len(splits) > 1:
             namespace = splits[0]
@@ -1014,7 +1024,7 @@ class ZIMClient:
             namespace = "A"
             url = path
         # get the desired article
-        article = self._zim_file.get_article_by_url(namespace, url)
+        article = self._zim_file.get_article_by_url(namespace, url, follow_redirect=follow_redirect)
         if not article:
             raise KeyError("There is no resource available at '" + str(path) + "' .")
 
