@@ -653,16 +653,22 @@ class ZIMFile:
     def get_article_by_id(self, idx, follow_redirect=True):
         return self._get_article_by_index(idx, follow_redirect=follow_redirect)
 
-    def get_xapian_offset(self):
+    def get_xapian_offset(self, force_title_only=False):
         # identify whether a full-text Xapian index is available
-        _, xapian_idx = self._get_entry_by_url("X", "fulltext/xapian")
-        full = True
-        if not xapian_idx:  # if we did not get a response try a title index instead as fallback option
+        _, xapian_idx = self._get_entry_by_url("X", "fulltext/xapian" if not force_title_only else "title/xapian")
+        full = True and not force_title_only
+
+        # if we did not get a response try a title index instead as fallback option
+        if not xapian_idx and not force_title_only:
             _, xapian_idx = self._get_entry_by_url("X", "title/xapian")
             full = False
         logging.info("no Xapian index found" if not xapian_idx else "found Xapian index (full-text: " + str(full) + ")")
         # return the offset if we found either the full-text or Title index, or return None otherwise
-        return self._get_article_by_index(xapian_idx, follow_redirect=True, return_offset=True) if xapian_idx else None
+
+        if not xapian_idx:
+            return None, False
+
+        return self._get_article_by_index(xapian_idx, follow_redirect=True, return_offset=True), full
 
     def get_main_page(self):
         """
@@ -865,6 +871,27 @@ class SearchIndex(object):
         """
         return 0
 
+    def suggest(self, query, start=0, end=9, separator=" "):
+        """
+        Search a (potentially smaller) index for the given query.
+        Optional arguments allow for pagination and non-standard query formats.
+        :param query: the query to search for.
+        :param start: the first index of the results to be returned; defaults to 0 to indicate the first result.
+        :param end: the last index of the results to be returned; defaults to -1 to indicate all results.
+        :param separator: the character(s) separating different elements in the search query, defaults to one space.
+        :return: a list of SearchResult objects, sorted by score (highest first).
+        """
+        return []
+
+    def get_suggest_results_count(self, query, separator=" "):
+        """
+        Get the number of suggestions. Optional argument allows for non-standard query formats.
+        :param query: the query to search for.
+        :param separator: the character(s) separating different elements in the search query, defaults to one space.
+        :return: the number of expected search results.
+        """
+        return 0
+
 
 class FTSIndex(SearchIndex):
     def __init__(self, db, level, zim_file):
@@ -937,10 +964,17 @@ class FTSIndex(SearchIndex):
         results = cursor.fetchone()
         return results[0] if results and len(results) > 0 else 0
 
+    def suggest(self, query, start=0, end=9, separator=" "):
+        return self.search(query, start, end, separator)
+
+    def get_suggest_results_count(self, query, separator=" "):
+        return self.get_search_results_count(query, separator)
+
 
 class XapianIndex(SearchIndex):
-    def __init__(self, db, language, encoding):
+    def __init__(self, db, language, encoding, db_title=None):
         self.xapian_index = db
+        self.xapian_title_index = db_title
         self.language = language
         self.encoding = encoding
         super(XapianIndex, self).__init__()
@@ -992,6 +1026,18 @@ class XapianIndex(SearchIndex):
         matches = enquire.get_mset(0, self.xapian_index.get_doccount())
         return matches.size()
 
+    def suggest(self, query, start=0, end=9, separator=" "):
+        if not self.xapian_title_index:
+            return self.search(query, start, end, separator)
+        else:
+            pass
+
+    def get_suggest_results_count(self, query, separator=" "):
+        if not self.xapian_title_index:
+            return self.get_suggest_results_count(query, separator)
+        else:
+            pass
+
 
 class ZIMClient:
     def __init__(self, zim_filename, encoding, index_file=None, auto_delete=False):
@@ -1016,12 +1062,22 @@ class ZIMClient:
         has_xapian_index = False
         self.search_index = SearchIndex()
         if FOUND_XAPIAN:
-            xapian_offset = self._zim_file.get_xapian_offset()
+            xapian_offset, full_index = self._zim_file.get_xapian_offset()
             if xapian_offset is not None:
                 xapian_file = open(zim_filename)
                 xapian_file.seek(xapian_offset)
                 db = xapian.Database(xapian_file.fileno())
-                self.search_index = XapianIndex(db, self.language, encoding)
+
+                # try and retrieve the secondary search index for quick suggestions
+                alt_db = None
+                if full_index:
+                    xapian_offset, _ = self._zim_file.get_xapian_offset(force_title_only=True)
+                    if xapian_offset is not None:
+                        xapian_file = open(zim_filename)
+                        xapian_file.seek(xapian_offset)
+                        alt_db = xapian.Database(xapian_file.fileno())
+
+                self.search_index = XapianIndex(db, self.language, encoding, alt_db)
                 has_xapian_index = True
         if not has_xapian_index:
             result = mp.Queue()
