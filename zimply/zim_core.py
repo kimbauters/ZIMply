@@ -165,7 +165,8 @@ def convert_size(size):
 
 HEADER = [  # define the HEADER structure of a ZIM file
     Field("I", "magicNumber"),
-    Field("I", "version"),
+    Field("H", "major_version"),
+    Field("H", "minor_version"),
     Field("Q", "uuid_low"),
     Field("Q", "uuid_high"),
     Field("I", "articleCount"),
@@ -446,14 +447,16 @@ def binary_search(func, item, front, end):
 class ZIMFileIterator(object):
     def __init__(self, zim_file, start_from=0):
         self._zim_file = zim_file
-        self._namespace = self._zim_file.get_namespace_range("A")
-        self._idx = max(self._namespace.start, start_from)
+        self._namespace = self._zim_file.get_namespace_range("A" if zim_file.version <= (6, 0) else "C")
+        start = self._namespace.start if self._namespace.start else 0
+        self._idx = max(start, start_from)
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        if self._idx <= self._namespace.end:
+        end = self._namespace.end if self._namespace.end else 0
+        if self._idx <= end:
             idx = self._idx
             entry = self._zim_file.read_directory_entry_by_index(idx)
             entry["fullUrl"] = full_url(entry["namespace"], entry["url"])
@@ -483,6 +486,9 @@ class ZIMFile:
         self.file = open(filename, "rb")
         # retrieve the header fields
         self.header_fields = HeaderBlock(self._enc).unpack_from_file(self.file)
+        self.major = int(self.header_fields["major_version"])
+        self.minor = int(self.header_fields["minor_version"])
+        self.version = (self.major, self.minor)
         self.mimetype_list = MimeTypeListBlock(self._enc).unpack_from_file(self.file, self.header_fields["mimeListPos"])
         # create the object once for easy access
         self.redirectEntryBlock = RedirectEntryBlock(self._enc)
@@ -697,7 +703,8 @@ class ZIMFile:
         return metadata
 
     def __len__(self):  # retrieve the number of articles in the ZIM file
-        return self.get_namespace_range("A").count
+        result = self.get_namespace_range("A" if self.version <= (6, 0) else "C")
+        return result.count
 
     def get_iterator(self, start_from=0):
         return ZIMFileIterator(self, start_from=start_from)
@@ -709,7 +716,7 @@ class ZIMFile:
     def get_namespace_range(self, namespace):
         """
         Retrieve information on a namespace including the number of entries and the start/end index
-        :param namespace: the namespace to look for such as "A"
+        :param namespace: the namespace to look for such as "A" or "C"
         :return: a Namespace object with the count, and start/end index of entries (inclusive)
         """
         start_low = 0
@@ -972,12 +979,13 @@ class FTSIndex(SearchIndex):
 
 
 class XapianIndex(SearchIndex):
-    def __init__(self, db, language, encoding, db_title=None):
+    def __init__(self, db, language, encoding, zim_version, db_title=None):
+        super(XapianIndex, self).__init__()
         self.xapian_index = db
         self.xapian_title_index = db_title
+        self.zim_version = zim_version
         self.language = language
         self.encoding = encoding
-        super(XapianIndex, self).__init__()
 
     @property
     def has_search(self):
@@ -1001,7 +1009,9 @@ class XapianIndex(SearchIndex):
         entries = []
         for match in matches:  # ... iterate over all the results
             location = match.document.get_data().decode(encoding=self.encoding)  # the document is the URL
-            namespace, url = split_path(location, heuristic_split=False)
+            namespace, url = split_path(location,
+                                        assumed_namespace="A" if self.zim_version <= (6, 0) else "C",
+                                        heuristic_split=False)
 
             # beware there be magic numbers - taken from the C++ code of libzim
             title = match.document.get_value(0).decode(encoding=self.encoding)
@@ -1077,7 +1087,7 @@ class ZIMClient:
                         xapian_file.seek(xapian_offset)
                         alt_db = xapian.Database(xapian_file.fileno())
 
-                self.search_index = XapianIndex(db, self.language, encoding, alt_db)
+                self.search_index = XapianIndex(db, self.language, encoding, self._zim_file.version, alt_db)
                 has_xapian_index = True
         if not has_xapian_index:
             result = mp.Queue()
@@ -1087,6 +1097,11 @@ class ZIMClient:
             if fts_index:
                 logging.info("Search index available; continuing.")
                 self.search_index = FTSIndex(sqlite3.connect(fts_index), process.level, self._zim_file)
+
+    def _split_path(self, path, heuristic_split):
+        return split_path(path,
+                          assumed_namespace="A" if self._zim_file.version <= (6, 0) else "C",
+                          heuristic_split=heuristic_split)
 
     def get_article(self, path, follow_redirect=True, robust_namespace=True):
         """
@@ -1100,13 +1115,13 @@ class ZIMClient:
         article = None
         if robust_namespace:
             # get the desired article assuming a namespace/url format
-            namespace, url = split_path(path, heuristic_split=False)
+            namespace, url = self._split_path(path, heuristic_split=False)
             article = self._zim_file.get_article_by_url(namespace, url, follow_redirect=follow_redirect)
 
         # rely on a heuristic fallback when no article is found, or immediately use it when no robust result is required
         if not article:
             # get the desired article assuming a namespace/url format where namespace is a single character
-            namespace, url = split_path(path, heuristic_split=True)
+            namespace, url = self._split_path(path, heuristic_split=True)
             article = self._zim_file.get_article_by_url(namespace, url, follow_redirect=follow_redirect)
 
         if not article:
@@ -1118,7 +1133,7 @@ class ZIMClient:
         return self._zim_file.get_namespace_range(namespace).count
 
     def random_article(self):
-        namespace = self._zim_file.get_namespace_range("A")
+        namespace = self._zim_file.get_namespace_range("A" if self._zim_file.version <= (6, 0) else "C")
         idx = random.randint(namespace.start, namespace.end)
         return self._zim_file.get_article_by_id(idx)
 
