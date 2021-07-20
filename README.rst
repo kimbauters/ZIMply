@@ -48,4 +48,6 @@ Version 2 of **ZIMply** brings a large number of improvements. Many of these imp
 * there is support for the newer FTS5 indexing in SQLite which is much more memory-efficient;
 * fallback indexing now runs in the background (so there is no need to wait on indexing to complete), and indexing can be interrupted and continued (so you can close **ZIMply** and continue the next time);
 * **ZIMply** is now split in a core component and a server component. The core component only relies on the `lzma` package (with optional support for Xapian). This makes it easier to add support for reading ZIM files in your own projects;
-* **ZIMply** now supports a lot of additional functionality, such as opening a random article, or paginating results.
+* **ZIMply** now supports a lot of additional functionality, such as opening a random article, or paginating results;
+* better support for non-trivial ZIM files, such as wikibooks, which introduce potential namespace collisions;
+* support for the new ZIM file format 6,1 namespaces such as in https://mirror.download.kiwix.org/zim/.hidden/dev/beer_stackexchange_com_2021-07.zim .
