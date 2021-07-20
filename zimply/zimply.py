@@ -53,8 +53,10 @@ from zim_core import ZIMClient, to_bytes
 # Python 2.7 workarounds
 try:
     from urllib.parse import unquote
+    from urllib.parse import quote
 except ImportError:
     from urllib import unquote as stdlib_unquote
+    from urllib import pathname2url as quote
 
     # make unquote in Python 2.7 behave as in Python 3
     def unquote(string, encoding="utf-8", errors="replace"):
@@ -107,7 +109,7 @@ class ZIMRequestHandler:
             try:
                 article = self.client.get_article(path)
                 # we have an article when the namespace is A (i.e. not a photo, etc.)
-                is_article = (article.namespace == "A")
+                is_article = article is not None and (article.namespace == "A")
             except KeyError:
                 article = None
                 is_article = False
@@ -184,7 +186,7 @@ class ZIMRequestHandler:
                     body = "no results found for: " + " <i>" + " ".join(keywords) + "</i>"
                 else:
                     for entry in weighted_result:
-                        body += "<a href=\"{}\">{}</a><br />".format(entry.url, entry.title)
+                        body += "<a href=\"{}\">{}</a><br />".format(quote(entry.url), entry.title)
 
         else:  # if we did not achieve success
             response.status = falcon.HTTP_404

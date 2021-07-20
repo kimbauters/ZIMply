@@ -392,6 +392,31 @@ def full_url(namespace, url):
     return namespace + u"/" + url
 
 
+def split_path(path, assumed_namespace="A", heuristic_split=True):
+    """
+    split a path into the namespace and a URL
+    when a namespace is missing this function returns a configurable default namespace
+    as desired this function can apply a heuristic split to distinguish between what is likely a namespace and/or url
+    :param path: the path to split into a namespace and a url
+    :param assumed_namespace: the default namespace to return if no namespace is found
+    :param heuristic_split: use heuristics to identify what is a namespace and what is part of a url
+    :return: a pair consisting of the namespace and the url
+    """
+    splits = path.split("/")
+    if len(splits) == 0:
+        return assumed_namespace, ""
+    elif len(splits) == 1:
+        return assumed_namespace, splits[0]
+    else:
+        if heuristic_split:
+            if len(splits[0]) == 1:
+                return splits[0], "/".join(splits[1:])
+            else:
+                return assumed_namespace, "/".join(splits[0:])
+        else:
+            return splits[0], "/".join(splits[1:])
+
+
 def binary_search(func, item, front, end):
     logging.debug("performing binary search with boundaries " + str(front) +
                   " - " + str(end))
@@ -942,15 +967,7 @@ class XapianIndex(SearchIndex):
         entries = []
         for match in matches:  # ... iterate over all the results
             location = match.document.get_data().decode(encoding=self.encoding)  # the document is the URL
-            splits = location.split("/")
-            if len(splits) == 0:
-                continue  # nothing to do here
-            elif len(splits) == 1:
-                namespace = "A"  # assume a basic article
-                url = splits[1]
-            else:
-                namespace = splits[0]
-                url = "/".join(splits[1:])
+            namespace, url = split_path(location, heuristic_split=False)
 
             # beware there be magic numbers - taken from the C++ code of libzim
             title = match.document.get_value(0).decode(encoding=self.encoding)
@@ -1015,16 +1032,27 @@ class ZIMClient:
                 logging.info("Search index available; continuing.")
                 self.search_index = FTSIndex(sqlite3.connect(fts_index), process.level, self._zim_file)
 
-    def get_article(self, path, follow_redirect=True):
-        splits = path.split("/")
-        if len(splits) > 1:
-            namespace = splits[0]
-            url = "/".join(splits[1:])
-        else:
-            namespace = "A"
-            url = path
-        # get the desired article
-        article = self._zim_file.get_article_by_url(namespace, url, follow_redirect=follow_redirect)
+    def get_article(self, path, follow_redirect=True, robust_namespace=True):
+        """
+        Retrieve an article based on its local path, e.g. A/Article.html
+        :param path: the local path without a leading slash
+        :param follow_redirect: whether or not to follow the full redirect chain to the intended article
+        :param robust_namespace: whether or not to use a robust namespace method (with a small performance penalty)
+        :return: an Article object if it exists
+        :throws: KeyError when the path does not exist
+        """
+        article = None
+        if robust_namespace:
+            # get the desired article assuming a namespace/url format
+            namespace, url = split_path(path, heuristic_split=False)
+            article = self._zim_file.get_article_by_url(namespace, url, follow_redirect=follow_redirect)
+
+        # rely on a heuristic fallback when no article is found, or immediately use it when no robust result is required
+        if not article:
+            # get the desired article assuming a namespace/url format where namespace is a single character
+            namespace, url = split_path(path, heuristic_split=True)
+            article = self._zim_file.get_article_by_url(namespace, url, follow_redirect=follow_redirect)
+
         if not article:
             raise KeyError("There is no resource available at '" + str(path) + "' .")
 
