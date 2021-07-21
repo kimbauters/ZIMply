@@ -890,7 +890,7 @@ class SearchIndex(object):
         """
         return []
 
-    def get_suggest_results_count(self, query, separator=" "):
+    def get_suggestions_results_count(self, query, separator=" "):
         """
         Get the number of suggestions. Optional argument allows for non-standard query formats.
         :param query: the query to search for.
@@ -974,7 +974,7 @@ class FTSIndex(SearchIndex):
     def suggest(self, query, start=0, end=9, separator=" "):
         return self.search(query, start, end, separator)
 
-    def get_suggest_results_count(self, query, separator=" "):
+    def get_suggestions_results_count(self, query, separator=" "):
         return self.get_search_results_count(query, separator)
 
 
@@ -991,7 +991,9 @@ class XapianIndex(SearchIndex):
     def has_search(self):
         return True
 
-    def search(self, query, start=0, end=-1, separator=" "):
+    def search(self, query, start=0, end=-1, separator=" ", full_index=True):
+        search_index = self.xapian_index if full_index or self.xapian_title_index is None else self.xapian_title_index
+
         parser = xapian.QueryParser()
         parser.set_stemmer(xapian.Stem(self.language))
         # NOTE: the STEM_SOME strategy is not working as expected
@@ -1001,9 +1003,9 @@ class XapianIndex(SearchIndex):
         query = parser.parse_query(query)
 
         # create the enquirer that will do the search
-        enquire = xapian.Enquire(self.xapian_index)
+        enquire = xapian.Enquire(search_index)
         enquire.set_query(query)
-        end = self.xapian_index.get_doccount() if end == -1 else end
+        end = search_index.get_doccount() if end == -1 else end
         matches = enquire.get_mset(start, end - start)
 
         entries = []
@@ -1021,7 +1023,9 @@ class XapianIndex(SearchIndex):
             entries.append(SearchResult(match.weight, idx, namespace, url, title))
         return sorted(entries, reverse=True, key=lambda x: x.score)
 
-    def get_search_results_count(self, query, separator=" "):
+    def get_search_results_count(self, query, separator=" ", full_index=True):
+        search_index = self.xapian_index if full_index or self.xapian_title_index is None else self.xapian_title_index
+
         parser = xapian.QueryParser()
         parser.set_stemmer(xapian.Stem(self.language))
         # NOTE: the STEM_SOME strategy is not working as expected
@@ -1031,22 +1035,22 @@ class XapianIndex(SearchIndex):
         query = parser.parse_query(query)
 
         # create the enquirer that will do the search
-        enquire = xapian.Enquire(self.xapian_index)
+        enquire = xapian.Enquire(search_index)
         enquire.set_query(query)
-        matches = enquire.get_mset(0, self.xapian_index.get_doccount())
+        matches = enquire.get_mset(0, search_index.get_doccount())
         return matches.size()
 
     def suggest(self, query, start=0, end=9, separator=" "):
         if not self.xapian_title_index:
             return self.search(query, start, end, separator)
         else:
-            pass
+            return self.search(query, start, end, separator, full_index=False)
 
-    def get_suggest_results_count(self, query, separator=" "):
+    def get_suggestions_results_count(self, query, separator=" "):
         if not self.xapian_title_index:
-            return self.get_suggest_results_count(query, separator)
+            return self.get_search_results_count(query, separator)
         else:
-            pass
+            return self.get_search_results_count(query, separator, full_index=False)
 
 
 class ZIMClient:
@@ -1146,6 +1150,13 @@ class ZIMClient:
 
     def get_search_results_count(self, query, separator=" "):
         return self.get_search_results_count(query, separator=separator)
+
+    def suggest(self, query, start=0, end=9, separator=" "):
+        return self.search_index.suggest(query, start, end, separator)
+
+    def get_suggestions_results_count(self, query, separator=" "):
+        return self.search_index.get_suggestions_results_count(query, separator)
+
 
     @property
     def main_page(self):
