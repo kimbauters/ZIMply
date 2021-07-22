@@ -99,12 +99,6 @@ def to_bytes(data, encoding):
         return data.encode(encoding)
 
 
-verbose = False
-
-logging.basicConfig(filename="zimply.log", filemode="w",
-                    format="%(levelname)s: %(message)s",
-                    level=logging.DEBUG if verbose else logging.INFO)
-
 #####
 # Definition of a number of basic structures/functions to simplify the code
 #####
