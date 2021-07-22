@@ -1003,8 +1003,9 @@ class XapianIndex(SearchIndex):
     def has_search(self):
         return True
 
-    def search(self, query, start=0, end=-1, separator=" ", full_index=True,
-               xapian_flags=xapian.QueryParser.FLAG_WILDCARD | xapian.QueryParser.FLAG_SPELLING_CORRECTION):
+    def search(self, query, start=0, end=-1, separator=" ", full_index=True, xapian_flags=None):
+        if xapian_flags is None:
+            xapian_flags = xapian.QueryParser.FLAG_WILDCARD | xapian.QueryParser.FLAG_SPELLING_CORRECTION
         # this supports Xapian flags - for an overview, see:
         # https://xapian.org/docs/apidoc/html/classXapian_1_1QueryParser.html#ae96a58a8de9d219ca3214a5a66e0407e
         search_index = self.xapian_index if full_index or self.xapian_title_index is None else self.xapian_title_index
@@ -1043,9 +1044,9 @@ class XapianIndex(SearchIndex):
             entries.append(SearchResult(match.weight, idx, namespace, url, title))
         return sorted(entries, reverse=True, key=lambda x: x.score)
 
-    def get_search_results_count(self, query, separator=" ", full_index=True,
-                                 xapian_flags=xapian.QueryParser.FLAG_WILDCARD |
-                                              xapian.QueryParser.FLAG_SPELLING_CORRECTION):
+    def get_search_results_count(self, query, separator=" ", full_index=True, xapian_flags=None):
+        if xapian_flags is None:
+            xapian_flags = xapian.QueryParser.FLAG_WILDCARD | xapian.QueryParser.FLAG_SPELLING_CORRECTION
         search_index = self.xapian_index if full_index or self.xapian_title_index is None else self.xapian_title_index
 
         parser = xapian.QueryParser()
