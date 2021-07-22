@@ -1154,7 +1154,7 @@ class ZIMClient:
     @property
     def random_article_url(self):
         article = self.random_article
-        return article.url
+        return article.namespace + "/" + article.url if article.namespace else article.url
 
     @property
     def has_search(self):
