@@ -979,10 +979,20 @@ class FTSIndex(SearchIndex):
 
 
 class XapianIndex(SearchIndex):
-    def __init__(self, db, language, encoding, zim_version, db_title=None):
+    def __init__(self, db_offset, language, encoding, zim_filename, zim_version, alt_db_offset=None):
         super(XapianIndex, self).__init__()
+        self._xapian_file = open(zim_filename)
+        self._xapian_file.seek(db_offset)
+        db = xapian.Database(self._xapian_file.fileno())
+
+        alt_db = None
+        if alt_db_offset is not None:
+            self._alt_xapian_file = open(zim_filename)
+            self._alt_xapian_file.seek(alt_db_offset)
+            alt_db = xapian.Database(self._alt_xapian_file.fileno())
+
         self.xapian_index = db
-        self.xapian_title_index = db_title
+        self.xapian_title_index = alt_db
         self.zim_version = zim_version
         self.language = language
         self.encoding = encoding
@@ -1005,7 +1015,7 @@ class XapianIndex(SearchIndex):
         # create the enquirer that will do the search
         enquire = xapian.Enquire(search_index)
         enquire.set_query(query)
-        end = search_index.get_doccount() if end == -1 else end
+        end = search_index.get_doccount() if end == -1 else min(end, search_index.get_doccount())
         matches = enquire.get_mset(start, end - start)
 
         entries = []
@@ -1056,6 +1066,8 @@ class XapianIndex(SearchIndex):
 class ZIMClient:
     def __init__(self, zim_filename, encoding, index_file=None, auto_delete=False):
         # create the object to access the ZIM file
+        # TODO: ensure file exists before continuing
+        # TODO: verify that file is a valid ZIM file? throw ZIM error?
         self._zim_file = ZIMFile(zim_filename, encoding)
         self.encoding = encoding
 
@@ -1078,20 +1090,17 @@ class ZIMClient:
         if FOUND_XAPIAN:
             xapian_offset, full_index = self._zim_file.get_xapian_offset()
             if xapian_offset is not None:
-                xapian_file = open(zim_filename)
-                xapian_file.seek(xapian_offset)
-                db = xapian.Database(xapian_file.fileno())
+                db_offset = xapian_offset
 
                 # try and retrieve the secondary search index for quick suggestions
-                alt_db = None
+                alt_offset = None
                 if full_index:
                     xapian_offset, _ = self._zim_file.get_xapian_offset(force_title_only=True)
                     if xapian_offset is not None:
-                        xapian_file = open(zim_filename)
-                        xapian_file.seek(xapian_offset)
-                        alt_db = xapian.Database(xapian_file.fileno())
+                        alt_offset = xapian_offset
 
-                self.search_index = XapianIndex(db, self.language, encoding, self._zim_file.version, alt_db)
+                self.search_index = XapianIndex(db_offset, self.language, encoding,
+                                                zim_filename, self._zim_file.version, alt_offset)
                 has_xapian_index = True
         if not has_xapian_index:
             result = mp.Queue()
@@ -1162,7 +1171,6 @@ class ZIMClient:
 
     def get_suggestions_results_count(self, query, separator=" "):
         return self.search_index.get_suggestions_results_count(query, separator)
-
 
     @property
     def main_page(self):
