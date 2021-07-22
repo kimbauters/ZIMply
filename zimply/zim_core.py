@@ -1149,7 +1149,7 @@ class ZIMClient:
         return self.search_index.search(query, start=start, end=end, separator=separator)
 
     def get_search_results_count(self, query, separator=" "):
-        return self.get_search_results_count(query, separator=separator)
+        return self.search_index.get_search_results_count(query, separator=separator)
 
     def suggest(self, query, start=0, end=9, separator=" "):
         return self.search_index.suggest(query, start, end, separator)
