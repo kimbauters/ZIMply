@@ -1001,7 +1001,10 @@ class XapianIndex(SearchIndex):
     def has_search(self):
         return True
 
-    def search(self, query, start=0, end=-1, separator=" ", full_index=True):
+    def search(self, query, start=0, end=-1, separator=" ", full_index=True,
+               xapian_flags=xapian.QueryParser.FLAG_WILDCARD | xapian.QueryParser.FLAG_SPELLING_CORRECTION):
+        # this supports Xapian flags - for an overview, see:
+        # https://xapian.org/docs/apidoc/html/classXapian_1_1QueryParser.html#ae96a58a8de9d219ca3214a5a66e0407e
         search_index = self.xapian_index if full_index or self.xapian_title_index is None else self.xapian_title_index
 
         parser = xapian.QueryParser()
@@ -1010,7 +1013,12 @@ class XapianIndex(SearchIndex):
         parser.set_stemming_strategy(xapian.QueryParser.STEM_ALL)
         parser.set_default_op(xapian.Query.OP_AND)
 
-        query = parser.parse_query(query)
+        # add a wildcard * at the end of each search term if the wildcard flag is set
+        if (xapian_flags & xapian.QueryParser.FLAG_WILDCARD) == xapian.QueryParser.FLAG_WILDCARD:
+            splits = query.split(separator)
+            query = "* ".join(splits) + "*"
+        parser.set_database(search_index)  # needed for some flags such as FLAG_SPELLING_CORRECTION
+        query = parser.parse_query(query, xapian_flags)
 
         # create the enquirer that will do the search
         enquire = xapian.Enquire(search_index)
@@ -1033,7 +1041,9 @@ class XapianIndex(SearchIndex):
             entries.append(SearchResult(match.weight, idx, namespace, url, title))
         return sorted(entries, reverse=True, key=lambda x: x.score)
 
-    def get_search_results_count(self, query, separator=" ", full_index=True):
+    def get_search_results_count(self, query, separator=" ", full_index=True,
+                                 xapian_flags=xapian.QueryParser.FLAG_WILDCARD |
+                                              xapian.QueryParser.FLAG_SPELLING_CORRECTION):
         search_index = self.xapian_index if full_index or self.xapian_title_index is None else self.xapian_title_index
 
         parser = xapian.QueryParser()
@@ -1042,7 +1052,12 @@ class XapianIndex(SearchIndex):
         parser.set_stemming_strategy(xapian.QueryParser.STEM_ALL)
         parser.set_default_op(xapian.Query.OP_AND)
 
-        query = parser.parse_query(query)
+        # add a wildcard * at the end of each search term if the wildcard flag is set
+        if (xapian_flags & xapian.QueryParser.FLAG_WILDCARD) == xapian.QueryParser.FLAG_WILDCARD:
+            splits = query.split(separator)
+            query = "* ".join(splits) + "*"
+        parser.set_database(search_index)  # needed for some flags such as FLAG_SPELLING_CORRECTION
+        query = parser.parse_query(query, xapian_flags)
 
         # create the enquirer that will do the search
         enquire = xapian.Enquire(search_index)
@@ -1051,16 +1066,19 @@ class XapianIndex(SearchIndex):
         return matches.size()
 
     def suggest(self, query, start=0, end=9, separator=" "):
+        # always assume the last word is a partial match/wildcard
+        xapian_flags = xapian.QueryParser.FLAG_PARTIAL | xapian.QueryParser.FLAG_SPELLING_CORRECTION
         if not self.xapian_title_index:
-            return self.search(query, start, end, separator)
+            return self.search(query, start, end, separator, xapian_flags=xapian_flags)
         else:
-            return self.search(query, start, end, separator, full_index=False)
+            return self.search(query, start, end, separator, full_index=False, xapian_flags=xapian_flags)
 
     def get_suggestions_results_count(self, query, separator=" "):
+        xapian_flags = xapian.QueryParser.FLAG_PARTIAL | xapian.QueryParser.FLAG_SPELLING_CORRECTION
         if not self.xapian_title_index:
-            return self.get_search_results_count(query, separator)
+            return self.get_search_results_count(query, separator, xapian_flags=xapian_flags)
         else:
-            return self.get_search_results_count(query, separator, full_index=False)
+            return self.get_search_results_count(query, separator, full_index=False, xapian_flags=xapian_flags)
 
 
 class ZIMClient:
