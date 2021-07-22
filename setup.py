@@ -1,29 +1,47 @@
+#!/usr/bin/env python3
+import sys
+
 from setuptools import setup
 
+import zimply
+
+
+def read_file(fname):
+    """
+    Read file and decode in py2k
+    """
+    if sys.version_info < (3,):
+        return open(fname).read().decode("utf-8")
+    return open(fname).read()
+
+
+dist_name = "zimply_core"
+plugin_name = "zimply_core"
+repo_url = "https://github.com/endlessm/kolibri-zim-plugin"
+
+readme = read_file("README.md")
+
+description = """Fork of ZIMply with only the zimply_core module."""
+
+
 setup(
-        name='zimply',
-        packages=['zimply'],
-        version='1.1.4',
-        description="ZIMply is an easy to use, offline reader for Wikipedia - as well as other ZIM files - which provides access "
-                    "to them through any ordinary browser.",
-        long_description="ZIMply is an easy to use, offline reader for Wikipedia - as well as other ZIM files - which provides access "
-                    "to them through any ordinary browser. ZIMply is written entirely in Python 3 and, "
-                         "as the name implies, relies on ZIM files. Each ZIM file is a bundle containing thousands "
-                         "of articles, images, etc. as found on websites such as Wikipedia. ZIMply does all the "
-                         "unpacking for you, and allows you to access the offline Wikipedia right from your "
-                         "web browser by running its own web server.",
-        author="Kim Bauters",
-        author_email="kim.bauters@gmail.com",
+        name='zimply-core',
+        version=zimply.__version__,
+        description=description,
+        long_description=readme,
+        long_description_content_type="text/markdown",
+        packages=['zimply_core'],
+        package_dir={'zimply_core': 'zimply'},
+        author="Dylan McCall",
+        author_email="dylan@endlessos.org",
         license='MIT',
-        url="https://github.com/kimbauters/ZIMply",
-        download_url='https://github.com/kimbauters/ZIMply/tarball/1.1.4',
+        url="https://github.com/dylanmccall/ZIMply-core",
         keywords=['zim', 'wiki', 'wikipedia'],
-        install_requires=["gevent>=1.1.1", "falcon>=1.0.0", "mako>=1.0.3", "zstandard>=0.14.1"],
+        install_requires=["zstandard>=0.14.1"],
         classifiers=[
             'Programming Language :: Python :: 3.4',
             'License :: OSI Approved :: MIT License',
-            'Development Status :: 5 - Production/Stable',
+            "Development Status :: 2 - Pre-Alpha",
         ],
-        include_package_data=True,
         platforms='any',
 )
