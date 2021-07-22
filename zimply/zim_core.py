@@ -1136,10 +1136,16 @@ class ZIMClient:
     def get_namespace_count(self, namespace):
         return self._zim_file.get_namespace_range(namespace).count
 
+    @property
     def random_article(self):
         namespace = self._zim_file.get_namespace_range("A" if self._zim_file.version <= (6, 0) else "C")
         idx = random.randint(namespace.start, namespace.end)
         return self._zim_file.get_article_by_id(idx)
+
+    @property
+    def random_article_url(self):
+        article = self.random_article
+        return article.url
 
     @property
     def has_search(self):
