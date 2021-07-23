@@ -684,18 +684,16 @@ class ZIMFile:
         :return: a dict with the entry url as key and the metadata as value
         """
         metadata = {}
-        # iterate backwards over the entries
-        for i in range(self.header_fields["articleCount"] - 1, -1, -1):
+
+        metadata_namespace = self.get_namespace_range("M")
+        for i in range(metadata_namespace.start, metadata_namespace.end + 1):
             entry = self.read_directory_entry_by_index(i)  # get the entry
-            if entry["namespace"] == "M":  # check that it is still metadata
-                # turn the key to lowercase as per Kiwix standards
-                m_name = entry["url"].lower()
-                # get the data, which is encoded as an article
-                entry = self._get_article_by_index(i)
-                if entry:
-                    metadata[m_name] = self._get_article_by_index(i).data
-            else:  # stop as soon as we are no longer looking at metadata
-                break
+            # turn the key to lowercase as per Kiwix standards
+            m_name = entry["url"].lower()
+            # get the data, which is encoded as an article
+            entry = self._get_article_by_index(i)
+            if entry:
+                metadata[m_name] = self._get_article_by_index(i).data
         return metadata
 
     def __len__(self):  # retrieve the number of articles in the ZIM file
