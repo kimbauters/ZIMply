@@ -100,6 +100,25 @@ def to_bytes(data, encoding):
 
 
 #####
+# Common error classes
+#####
+class ZIMException(Exception):
+    pass
+
+
+class ZIMFileUnpackError(Exception):
+    pass
+
+
+class ZIMClientNoFile(ZIMException):
+    pass
+
+
+class ZIMClientInvalidFile(ZIMException):
+    pass
+
+
+#####
 # Definition of a number of basic structures/functions to simplify the code
 #####
 
@@ -479,16 +498,20 @@ class ZIMFile:
         # open the file as a binary file
         self.file = open(filename, "rb")
         # retrieve the header fields
-        self.header_fields = HeaderBlock(self._enc).unpack_from_file(self.file)
-        self.major = int(self.header_fields["major_version"])
-        self.minor = int(self.header_fields["minor_version"])
-        self.version = (self.major, self.minor)
-        self.mimetype_list = MimeTypeListBlock(self._enc).unpack_from_file(self.file, self.header_fields["mimeListPos"])
-        # create the object once for easy access
-        self.redirectEntryBlock = RedirectEntryBlock(self._enc)
+        try:
+            self.header_fields = HeaderBlock(self._enc).unpack_from_file(self.file)
+            self.major = int(self.header_fields["major_version"])
+            self.minor = int(self.header_fields["minor_version"])
+            self.version = (self.major, self.minor)
+            self.mimetype_list = MimeTypeListBlock(self._enc).unpack_from_file(self.file,
+                                                                               self.header_fields["mimeListPos"])
+            # create the object once for easy access
+            self.redirectEntryBlock = RedirectEntryBlock(self._enc)
 
-        self.articleEntryBlock = ArticleEntryBlock(self._enc)
-        self.clusterFormat = ClusterBlock(self._enc)
+            self.articleEntryBlock = ArticleEntryBlock(self._enc)
+            self.clusterFormat = ClusterBlock(self._enc)
+        except struct_error:
+            raise ZIMFileUnpackError
 
     def checksum(self, extra_fields=None):
         # create a checksum to uniquely identify this zim file
@@ -684,16 +707,16 @@ class ZIMFile:
         :return: a dict with the entry url as key and the metadata as value
         """
         metadata = {}
-        # iterate backwards over the entries
-        for i in range(self.header_fields["articleCount"] - 1, -1, -1):
+
+        metadata_namespace = self.get_namespace_range("M")
+        for i in range(metadata_namespace.start, metadata_namespace.end + 1):
             entry = self.read_directory_entry_by_index(i)  # get the entry
-            if entry["namespace"] == "M":  # check that it is still metadata
-                # turn the key to lowercase as per Kiwix standards
-                m_name = entry["url"].lower()
-                # get the data, which is encoded as an article
-                metadata[m_name] = self._get_article_by_index(i)[0]
-            else:  # stop as soon as we are no longer looking at metadata
-                break
+            # turn the key to lowercase as per Kiwix standards
+            m_name = entry["url"].lower()
+            # get the data, which is encoded as an article
+            entry = self._get_article_by_index(i)
+            if entry:
+                metadata[m_name] = self._get_article_by_index(i).data
         return metadata
 
     def __len__(self):  # retrieve the number of articles in the ZIM file
@@ -759,6 +782,9 @@ class ZIMFile:
             return Namespace(0, None, None, namespace)
 
         return Namespace(end - start + 1, start, end, namespace)
+
+    def get_articles_range(self):
+        return self.get_namespace_range("A" if self.version <= (6, 0) else "C")
 
     def close(self):
         self.file.close()
@@ -995,8 +1021,9 @@ class XapianIndex(SearchIndex):
     def has_search(self):
         return True
 
-    def search(self, query, start=0, end=-1, separator=" ", full_index=True,
-               xapian_flags=xapian.QueryParser.FLAG_WILDCARD | xapian.QueryParser.FLAG_SPELLING_CORRECTION):
+    def search(self, query, start=0, end=-1, separator=" ", full_index=True, xapian_flags=None):
+        if xapian_flags is None:
+            xapian_flags = xapian.QueryParser.FLAG_WILDCARD | xapian.QueryParser.FLAG_SPELLING_CORRECTION
         # this supports Xapian flags - for an overview, see:
         # https://xapian.org/docs/apidoc/html/classXapian_1_1QueryParser.html#ae96a58a8de9d219ca3214a5a66e0407e
         search_index = self.xapian_index if full_index or self.xapian_title_index is None else self.xapian_title_index
@@ -1035,9 +1062,9 @@ class XapianIndex(SearchIndex):
             entries.append(SearchResult(match.weight, idx, namespace, url, title))
         return sorted(entries, reverse=True, key=lambda x: x.score)
 
-    def get_search_results_count(self, query, separator=" ", full_index=True,
-                                 xapian_flags=xapian.QueryParser.FLAG_WILDCARD |
-                                              xapian.QueryParser.FLAG_SPELLING_CORRECTION):
+    def get_search_results_count(self, query, separator=" ", full_index=True, xapian_flags=None):
+        if xapian_flags is None:
+            xapian_flags = xapian.QueryParser.FLAG_WILDCARD | xapian.QueryParser.FLAG_SPELLING_CORRECTION
         search_index = self.xapian_index if full_index or self.xapian_title_index is None else self.xapian_title_index
 
         parser = xapian.QueryParser()
@@ -1076,18 +1103,39 @@ class XapianIndex(SearchIndex):
 
 
 class ZIMClient:
-    def __init__(self, zim_filename, encoding, index_file=None, auto_delete=False):
-        # create the object to access the ZIM file
-        # TODO: ensure file exists before continuing
-        # TODO: verify that file is a valid ZIM file? throw ZIM error?
-        self._zim_file = ZIMFile(zim_filename, encoding)
+    def __init__(self, zim_filename, encoding="utf-8", index_file=None, auto_delete=False):
+        """ Create a new ZIM client to easily access the provided ZIM file.
+        :param zim_filename: the path to the file to open as a ZIM file.
+        :param encoding: the encoding used in the ZIM file which is usually UTF-8 - this is not verified for you!
+        :param index_file: the location of where to create an index file if relying on SQLite FTS search.
+                           At this location a file *.idx and a file *.chk will be created.
+        :param auto_delete: by default the ZIMClient (silently) fails when a SQLite FTS index is opened
+                            for which the checksum (of the ongoing indexation) fails. By enabling this
+                            option the incorrect index will be deleted and recreated instead.
+        :raises:
+            ZIMClientNoFile: if zim_filename is recognised as a path to a file.
+            ZIMClientInvalidFile: if the file at zim_filename could not be successfully opened as a ZIM file.
+        """
+
+        if not os.path.isfile(zim_filename):
+            raise ZIMClientNoFile
+
+        self._zim_file = None
         self.encoding = encoding
 
-        # determine the language
+        try:
+            # create the object to access the ZIM file
+            self._zim_file = ZIMFile(zim_filename, encoding)
+        except ZIMFileUnpackError:
+            raise ZIMClientInvalidFile
+
+        # determine the language if set in the ZIM file
         default_iso = to_bytes("eng", encoding=encoding)
         iso639 = self._zim_file.metadata().get("language", default_iso).decode(encoding=encoding, errors="ignore")
         self.language = iso639_3to1.get(iso639, "en")
-        logging.info("ZIM file: language: " + self.language + " (ISO639-1), articles: " + str(len(self._zim_file)))
+        version = str(self._zim_file.major) + "," + str(self._zim_file.minor)
+        logging.info("ZIM file + (" + str(version) + ") - language: " +
+                     self.language + " (ISO639-1), articles: " + str(len(self._zim_file)))
 
         if not index_file:
             base = os.path.basename(zim_filename)
@@ -1159,7 +1207,7 @@ class ZIMClient:
 
     @property
     def random_article(self):
-        namespace = self._zim_file.get_namespace_range("A" if self._zim_file.version <= (6, 0) else "C")
+        namespace = self._zim_file.get_articles_range()
         idx = random.randint(namespace.start, namespace.end)
         return self._zim_file.get_article_by_id(idx)
 
