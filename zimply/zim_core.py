@@ -760,6 +760,9 @@ class ZIMFile:
 
         return Namespace(end - start + 1, start, end, namespace)
 
+    def get_articles_range(self):
+        return self.get_namespace_range("A" if self.version <= (6, 0) else "C")
+
     def close(self):
         self.file.close()
 
@@ -1160,7 +1163,7 @@ class ZIMClient:
 
     @property
     def random_article(self):
-        namespace = self._zim_file.get_namespace_range("A" if self._zim_file.version <= (6, 0) else "C")
+        namespace = self._zim_file.get_articles_range()
         idx = random.randint(namespace.start, namespace.end)
         return self._zim_file.get_article_by_id(idx)
 
