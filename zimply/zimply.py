@@ -64,6 +64,14 @@ except ImportError:
             raise TypeError("A bytes-like object is required: got '{}'".format(type(string)))
         return stdlib_unquote(string.encode(encoding)).decode(encoding, errors=errors)
 
+
+verbose = False
+
+logging.basicConfig(filename="zimply.log", filemode="w",
+                    format="%(levelname)s: %(message)s",
+                    level=logging.DEBUG if verbose else logging.INFO)
+
+
 #####
 # The supporting classes to provide the HTTP server. This includes the template
 # and the actual request handler that uses the ZIM file to retrieve the desired
