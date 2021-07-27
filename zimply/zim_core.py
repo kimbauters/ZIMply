@@ -1103,7 +1103,7 @@ class XapianIndex(SearchIndex):
 
 
 class ZIMClient:
-    def __init__(self, zim_filename, encoding="utf-8", index_file=None, auto_delete=False):
+    def __init__(self, zim_filename, encoding="utf-8", index_file=None, auto_delete=False, enable_search_index=True):
         """ Create a new ZIM client to easily access the provided ZIM file.
         :param zim_filename: the path to the file to open as a ZIM file.
         :param encoding: the encoding used in the ZIM file which is usually UTF-8 - this is not verified for you!
@@ -1112,6 +1112,9 @@ class ZIMClient:
         :param auto_delete: by default the ZIMClient (silently) fails when a SQLite FTS index is opened
                             for which the checksum (of the ongoing indexation) fails. By enabling this
                             option the incorrect index will be deleted and recreated instead.
+        :param enable_search_index: by default the ZIMClient will use a Xapian index if Xapian is available and
+                                    one exists in the ZIM file. Otherwise, it will create a search index in a
+                                    subprocess. Setting this option to False disables that fallback.
         :raises:
             ZIMClientNoFile: if zim_filename is recognised as a path to a file.
             ZIMClientInvalidFile: if the file at zim_filename could not be successfully opened as a ZIM file.
@@ -1162,7 +1165,7 @@ class ZIMClient:
                 self.search_index = XapianIndex(db_offset, self.language, encoding,
                                                 zim_filename, self._zim_file.version, alt_offset)
                 has_xapian_index = True
-        if not has_xapian_index:
+        if enable_search_index and not has_xapian_index:
             result = mp.Queue()
             process = CreateFTSProcess(result, index_file, ZIMFile(zim_filename, encoding), auto_delete=auto_delete)
             process.start()
