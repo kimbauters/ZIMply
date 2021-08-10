@@ -39,7 +39,6 @@ from __future__ import print_function
 
 import io
 import logging
-import multiprocessing as mp
 import os
 import random
 import sqlite3
@@ -50,6 +49,16 @@ from hashlib import sha256
 from itertools import chain
 from struct import Struct, pack, unpack, error as struct_error
 from time import sleep
+
+try:
+    # Raises ImportError if multiprocessing is unsupported on this platform
+    from multiprocessing import synchronize
+
+    from multiprocessing import Process as Thread
+    from multiprocessing import Queue
+except ImportError:
+    from threading import Thread
+    from queue import Queue
 
 import zstandard
 from math import floor, pow, log
@@ -1243,7 +1252,7 @@ class ZIMClient:
         self._zim_file.close()
 
 
-class CreateFTSProcess(mp.Process):
+class CreateFTSProcess(Thread):
     def __init__(self, connect_queue, index_file, zim_file, auto_delete=False):
         super(CreateFTSProcess, self).__init__()
         self.connect_queue = connect_queue
