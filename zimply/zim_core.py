@@ -943,7 +943,7 @@ class FTSIndex(SearchIndex):
             cursor.execute("SELECT rowid FROM docs WHERE title MATCH ?", (term,))
         else:
             offset = " OFFSET " + str(start) if end != 0 and end >= start else ""
-            limit = "" if end == -1 or not offset else " LIMIT " + str(max(0, end - start + 1))
+            limit = "" if end == -1 or not offset else " LIMIT " + str(max(0, end - start))
             cursor.execute("SELECT rowid, rank FROM docs WHERE title MATCH ? ORDER BY rank" + limit + offset, (term,))
 
         results = cursor.fetchall()
