@@ -1109,7 +1109,7 @@ class XapianIndex(SearchIndex):
 
 
 class ZIMClient:
-    def __init__(self, zim_filename, encoding="utf-8", index_file=None, auto_delete=False):
+    def __init__(self, zim_filename, encoding="utf-8", index_file=None, auto_delete=False, enable_search=True):
         """ Create a new ZIM client to easily access the provided ZIM file.
         :param zim_filename: the path to the file to open as a ZIM file.
         :param encoding: the encoding used in the ZIM file which is usually UTF-8 - this is not verified for you!
@@ -1118,6 +1118,7 @@ class ZIMClient:
         :param auto_delete: by default the ZIMClient (silently) fails when a SQLite FTS index is opened
                             for which the checksum (of the ongoing indexation) fails. By enabling this
                             option the incorrect index will be deleted and recreated instead.
+        :param enable_search: set to False to disable ZIMClient's search functionality.
         :raises:
             ZIMClientNoFile: if zim_filename is recognised as a path to a file.
             ZIMClientInvalidFile: if the file at zim_filename could not be successfully opened as a ZIM file.
@@ -1148,15 +1149,21 @@ class ZIMClient:
         logging.info("The index file is determined to be located at " + str(index_file) + ".")
 
         # set this object to a class variable of ZIMRequestHandler
-        self.search_index = self.__get_xapian_search_index(self._zim_file)
+        self.search_index = None
 
-        if not self.search_index:
+        if enable_search and not self.search_index:
+            self.search_index = self.__get_xapian_search_index(self._zim_file)
+
+        if enable_search and not self.search_index:
             self.search_index = self.__create_search_indexer_thread(
                 self._zim_file, index_file, auto_delete=auto_delete
             )
 
         if not self.search_index:
+            print("NULL SEARCH INDEX")
             self.search_index = SearchIndex()
+        else:
+            print("REAL SEARCH INDEX")
 
     def __get_xapian_search_index(self, zim_file):
         if not FOUND_XAPIAN:
