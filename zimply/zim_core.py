@@ -503,6 +503,7 @@ class ZIMFile:
     """
 
     def __init__(self, filename, encoding):
+        self._filename = filename
         self._enc = encoding
         # open the file as a binary file
         self.file = open(filename, "rb")
@@ -521,6 +522,9 @@ class ZIMFile:
             self.clusterFormat = ClusterBlock(self._enc)
         except struct_error:
             raise ZIMFileUnpackError
+    
+    def copy(self):
+        return ZIMFile(self._filename, self._enc)
 
     def checksum(self, extra_fields=None):
         # create a checksum to uniquely identify this zim file
@@ -1112,7 +1116,7 @@ class XapianIndex(SearchIndex):
 
 
 class ZIMClient:
-    def __init__(self, zim_filename, encoding="utf-8", index_file=None, auto_delete=False, enable_search_index=True):
+    def __init__(self, zim_filename, encoding="utf-8", index_file=None, auto_delete=False):
         """ Create a new ZIM client to easily access the provided ZIM file.
         :param zim_filename: the path to the file to open as a ZIM file.
         :param encoding: the encoding used in the ZIM file which is usually UTF-8 - this is not verified for you!
@@ -1121,9 +1125,6 @@ class ZIMClient:
         :param auto_delete: by default the ZIMClient (silently) fails when a SQLite FTS index is opened
                             for which the checksum (of the ongoing indexation) fails. By enabling this
                             option the incorrect index will be deleted and recreated instead.
-        :param enable_search_index: by default the ZIMClient will use a Xapian index if Xapian is available and
-                                    one exists in the ZIM file. Otherwise, it will create a search index in a
-                                    subprocess. Setting this option to False disables that fallback.
         :raises:
             ZIMClientNoFile: if zim_filename is recognised as a path to a file.
             ZIMClientInvalidFile: if the file at zim_filename could not be successfully opened as a ZIM file.
@@ -1131,9 +1132,6 @@ class ZIMClient:
 
         if not os.path.isfile(zim_filename):
             raise ZIMClientNoFile
-
-        self._zim_file = None
-        self.encoding = encoding
 
         try:
             # create the object to access the ZIM file
@@ -1157,31 +1155,47 @@ class ZIMClient:
         logging.info("The index file is determined to be located at " + str(index_file) + ".")
 
         # set this object to a class variable of ZIMRequestHandler
-        has_xapian_index = False
-        self.search_index = SearchIndex()
-        if FOUND_XAPIAN:
-            xapian_offset, full_index = self._zim_file.get_xapian_offset()
+        self.search_index = self.__get_xapian_search_index(self._zim_file)
+
+        if not self.search_index:
+            self.search_index = self.__create_search_indexer_process(
+                self._zim_file, index_file, auto_delete=auto_delete
+            )
+
+        if not self.search_index:
+            self.search_index = SearchIndex()
+
+    def __get_xapian_search_index(self, zim_file):
+        if not FOUND_XAPIAN:
+            return None
+            
+        xapian_offset, full_index = zim_file.get_xapian_offset()
+
+        if xapian_offset is None:
+            return None
+
+        db_offset = xapian_offset
+
+        # try and retrieve the secondary search index for quick suggestions
+        alt_offset = None
+        if full_index:
+            xapian_offset, _ = zim_file.get_xapian_offset(force_title_only=True)
             if xapian_offset is not None:
-                db_offset = xapian_offset
+                alt_offset = xapian_offset
 
-                # try and retrieve the secondary search index for quick suggestions
-                alt_offset = None
-                if full_index:
-                    xapian_offset, _ = self._zim_file.get_xapian_offset(force_title_only=True)
-                    if xapian_offset is not None:
-                        alt_offset = xapian_offset
+        return XapianIndex(db_offset, self.language, zim_file._enc, zim_file._filename, zim_file.version, alt_offset)
 
-                self.search_index = XapianIndex(db_offset, self.language, encoding,
-                                                zim_filename, self._zim_file.version, alt_offset)
-                has_xapian_index = True
-        if enable_search_index and not has_xapian_index:
-            result = mp.Queue()
-            process = CreateFTSProcess(result, index_file, ZIMFile(zim_filename, encoding), auto_delete=auto_delete)
-            process.start()
-            fts_index = result.get()
-            if fts_index:
-                logging.info("Search index available; continuing.")
-                self.search_index = FTSIndex(sqlite3.connect(fts_index), process.level, self._zim_file)
+    def __create_search_indexer_process(self, zim_file, index_file, **kwargs):
+        result = Queue()
+        process = CreateFTSProcess(result, index_file, zim_file.copy(), **kwargs)
+        process.start()
+        index_file = result.get()
+
+        if index_file:
+            logging.info("Search index available; continuing.")
+            return FTSIndex(sqlite3.connect(index_file), process.level, zim_file)
+
+        return None
 
     def _split_path(self, path, heuristic_split):
         return split_path(path,
