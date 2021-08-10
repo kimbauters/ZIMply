@@ -50,15 +50,8 @@ from itertools import chain
 from struct import Struct, pack, unpack, error as struct_error
 from time import sleep
 
-try:
-    # Raises ImportError if multiprocessing is unsupported on this platform
-    from multiprocessing import synchronize
-
-    from multiprocessing import Process as Thread
-    from multiprocessing import Queue
-except ImportError:
-    from threading import Thread
-    from queue import Queue
+from threading import Thread
+from queue import Queue
 
 import zstandard
 from math import floor, pow, log
@@ -1158,7 +1151,7 @@ class ZIMClient:
         self.search_index = self.__get_xapian_search_index(self._zim_file)
 
         if not self.search_index:
-            self.search_index = self.__create_search_indexer_process(
+            self.search_index = self.__create_search_indexer_thread(
                 self._zim_file, index_file, auto_delete=auto_delete
             )
 
@@ -1185,15 +1178,15 @@ class ZIMClient:
 
         return XapianIndex(db_offset, self.language, zim_file._enc, zim_file._filename, zim_file.version, alt_offset)
 
-    def __create_search_indexer_process(self, zim_file, index_file, **kwargs):
+    def __create_search_indexer_thread(self, zim_file, index_file, **kwargs):
         result = Queue()
-        process = CreateFTSProcess(result, index_file, zim_file.copy(), **kwargs)
-        process.start()
+        thread = CreateFTSThread(result, index_file, zim_file.copy(), **kwargs)
+        thread.start()
         index_file = result.get()
 
         if index_file:
             logging.info("Search index available; continuing.")
-            return FTSIndex(sqlite3.connect(index_file), process.level, zim_file)
+            return FTSIndex(sqlite3.connect(index_file), thread.level, zim_file)
 
         return None
 
@@ -1266,9 +1259,9 @@ class ZIMClient:
         self._zim_file.close()
 
 
-class CreateFTSProcess(Thread):
+class CreateFTSThread(Thread):
     def __init__(self, connect_queue, index_file, zim_file, auto_delete=False):
-        super(CreateFTSProcess, self).__init__()
+        super(CreateFTSThread, self).__init__(daemon=True)
         self.connect_queue = connect_queue
         self.index_file = index_file
         self.zim_file = zim_file
