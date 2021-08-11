@@ -1151,6 +1151,9 @@ class ZIMClient:
         # set this object to a class variable of ZIMRequestHandler
         self.search_index = None
 
+        # TODO: Instead, we should provide a mechanism where the application
+        #       can manage a search indexer thread independent of ZIMClient.
+
         if enable_search and not self.search_index:
             self.search_index = self.__get_xapian_search_index(self._zim_file)
 
@@ -1160,10 +1163,7 @@ class ZIMClient:
             )
 
         if not self.search_index:
-            print("NULL SEARCH INDEX")
             self.search_index = SearchIndex()
-        else:
-            print("REAL SEARCH INDEX")
 
     def __get_xapian_search_index(self, zim_file):
         if not FOUND_XAPIAN:
