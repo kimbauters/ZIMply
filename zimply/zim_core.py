@@ -578,6 +578,9 @@ class ZIMFile:
         Read a directory entry using an index.
         :return: a DirectoryBlock - either as Article Entry or Redirect Entry
         """
+        # verify that the index is positive
+        if index < 0:
+            raise struct_error # we never have a valid entry for a negative index
         # find the offset for the given index
         offset = self._read_url_offset(index)
         if offset is not None:
