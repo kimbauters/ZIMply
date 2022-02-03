@@ -679,8 +679,9 @@ class ZIMFile:
 
     def get_article_by_url(self, namespace, url, follow_redirect=True):
         entry, idx = self._get_entry_by_url(namespace, url)  # get the entry
-        if idx:  # we found an index and return the article at that index
-            return self._get_article_by_index(idx, follow_redirect=follow_redirect)
+        if idx is None:
+            return None
+        return self._get_article_by_index(idx, follow_redirect=follow_redirect)
 
     def get_article_by_id(self, idx, follow_redirect=True):
         return self._get_article_by_index(idx, follow_redirect=follow_redirect)
