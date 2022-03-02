@@ -385,6 +385,9 @@ class DirectoryBlock(Block):
         field_values["url"] = read_zero_terminated(file_resource, self._encoding)
         # followed by the title, which is again a zero terminated field
         field_values["title"] = read_zero_terminated(file_resource, self._encoding)
+        # by ZIM definition the URL is the alternative for a title
+        if not field_values["title"]:
+            field_values["title"] = field_values["url"]
         field_values["namespace"] = field_values["namespace"].decode(encoding=self._encoding, errors="ignore")
         return field_values
 
@@ -616,8 +619,7 @@ class ZIMFile:
                     next_link = self._get_article_by_index(entry["redirectIndex"], False, return_offset)
                     return None if return_offset else Article(entry["url"],
                                                               full_url(entry["namespace"], entry["url"]),
-                                                              # by ZIM definition the URL is the alternative for a title
-                                                              entry["title"] if entry["title"] else entry["url"],
+                                                              entry["title"],
                                                               None, entry["namespace"], entry["redirectIndex"],
                                                               next_link.full_url)
             else:  # otherwise, we have an Article Entry
@@ -628,8 +630,7 @@ class ZIMFile:
                 else:  # we received the blob back; use it to create an Article object
                     return Article(entry["url"],
                                    full_url(entry["namespace"], entry["url"]),
-                                   # by ZIM definition the URL is the alternative for a title
-                                   entry["title"] if entry["title"] else entry["url"],
+                                   entry["title"],
                                    result, entry["namespace"], self.mimetype_list[entry["mimetype"]],
                                    None)
         else:
