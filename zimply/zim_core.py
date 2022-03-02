@@ -945,17 +945,20 @@ class FTSIndex(SearchIndex):
 
     def search(self, query, start=0, end=-1, separator=" "):
         logging.info("Searching for the terms '" + query + "' using FTS.")
-        keywords = query.split(separator)
-        term = "* ".join(keywords) + "*"
+        tokens = self._tokenize_search_query(query, separator)
+        match_expression = " ".join(
+            "\"{token}\" *".format(token=token)
+            for token in tokens
+        )
         cursor = self.db.cursor()
 
         # USING FTS5 we can perform pagination as part of the SQL query
         if self.level < 5:
-            cursor.execute("SELECT rowid FROM docs WHERE title MATCH ?", (term,))
+            cursor.execute("SELECT rowid FROM docs WHERE title MATCH ?", (match_expression,))
         else:
             offset = " OFFSET " + str(start) if end != 0 and end >= start else ""
             limit = "" if end == -1 or not offset else " LIMIT " + str(max(0, end - start))
-            cursor.execute("SELECT rowid, rank FROM docs WHERE title MATCH ? ORDER BY rank" + limit + offset, (term,))
+            cursor.execute("SELECT rowid, rank FROM docs WHERE title MATCH ? ORDER BY rank" + limit + offset, (match_expression,))
 
         results = cursor.fetchall()
         response = []
@@ -981,7 +984,7 @@ class FTSIndex(SearchIndex):
             titles = [entry["title"] for entry in entries]
             # calculate the scores or provide identical scores for all recors
             if not self.level >= 5:
-                scores = self.bm25.calculate_scores(keywords, titles)
+                scores = self.bm25.calculate_scores(tokens, titles)
             weighted_result = sorted(zip(scores, entries), reverse=False, key=lambda x: x[0])
             response = [SearchResult(item[0], item[1]["index"], item[1]["namespace"],
                                      item[1]["url"], item[1]["title"]) for item in weighted_result]
@@ -995,10 +998,13 @@ class FTSIndex(SearchIndex):
             return response[start:] if end == -1 else response[start:end + 1]
 
     def get_search_results_count(self, query, separator=" "):
-        keywords = query.split(separator)
-        search_for = "* ".join(keywords) + "*"
+        tokens = self._tokenize_search_query(query, separator)
+        match_expression = " ".join(
+            "\"{token}\" *".format(token=token)
+            for token in tokens
+        )
         cursor = self.db.cursor()
-        cursor.execute("SELECT COUNT(rowid) FROM docs WHERE title MATCH ?", (search_for,))
+        cursor.execute("SELECT COUNT(rowid) FROM docs WHERE title MATCH ?", (match_expression,))
         results = cursor.fetchone()
         return results[0] if results and len(results) > 0 else 0
 
@@ -1007,6 +1013,21 @@ class FTSIndex(SearchIndex):
 
     def get_suggestions_results_count(self, query, separator=" "):
         return self.get_search_results_count(query, separator)
+
+    def _tokenize_search_query(self, query, separator=" "):
+        tokens = []
+        quote = False
+
+        while query:
+            token, _part, query = query.partition('"')
+            token = token.strip()
+            if token and quote:
+                tokens.append(token.strip())
+            elif token:
+                tokens.extend(token.strip().split(separator))
+            quote = quote is False and _part == '"'
+        
+        return tokens
 
 
 class XapianIndex(SearchIndex):
