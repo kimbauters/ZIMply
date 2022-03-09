@@ -937,11 +937,7 @@ class FTSIndex(SearchIndex):
 
     def search(self, query, start=0, end=-1, separator=" "):
         logging.info("Searching for the terms '" + query + "' using FTS.")
-        tokens = self._tokenize_search_query(query, separator)
-        match_expression = " ".join(
-            "\"{token}\" *".format(token=token)
-            for token in tokens
-        )
+        tokens, match_expression = self._tokenize_search_query(query, separator)
         cursor = self.db.cursor()
 
         # USING FTS5 we can perform pagination as part of the SQL query
@@ -990,11 +986,7 @@ class FTSIndex(SearchIndex):
             return response[start:] if end == -1 else response[start:end + 1]
 
     def get_search_results_count(self, query, separator=" "):
-        tokens = self._tokenize_search_query(query, separator)
-        match_expression = " ".join(
-            "\"{token}\" *".format(token=token)
-            for token in tokens
-        )
+        _tokens, match_expression = self._tokenize_search_query(query, separator)
         cursor = self.db.cursor()
         cursor.execute("SELECT COUNT(rowid) FROM docs WHERE title MATCH ?", (match_expression,))
         results = cursor.fetchone()
@@ -1007,6 +999,17 @@ class FTSIndex(SearchIndex):
         return self.get_search_results_count(query, separator)
 
     def _tokenize_search_query(self, query, separator=" "):
+        """
+        Get a list of tokens along with FTS-compatible match expressions for a
+        user-provided search query. If multiple words are wrapped in quotation
+        marks, they are treated as a single token. In addition, the resulting
+        match expressions each contain a wildcard suffix to allow for partial
+        matching.
+        :param query: a search query
+        :param separator: the token separator character
+        :return: a 2-tuple of extracted tokens, and FTS match expressions
+        """
+
         tokens = []
         quote = False
 
@@ -1018,8 +1021,15 @@ class FTSIndex(SearchIndex):
             elif token:
                 tokens.extend(token.strip().split(separator))
             quote = quote is False and _part == '"'
+
+        # Wrap each token in quotation marks so it is treated literally,
+        # instead of as an operator for the FTS module.
+        match_expression = " ".join(
+            "\"{token}\" *".format(token=token)
+            for token in tokens
+        )
         
-        return tokens
+        return tokens, match_expression
 
 
 class XapianIndex(SearchIndex):
