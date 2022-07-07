@@ -56,6 +56,8 @@ from queue import Queue
 import zstandard
 from math import floor, pow, log
 
+from .split_file import SplitFile
+
 # add Xapian support - if available
 
 try:
@@ -498,11 +500,14 @@ class ZIMFile:
       is used to retrieve the main page article for the given ZIM file.
     """
 
-    def __init__(self, filename, encoding):
-        self._filename = filename
+    def __init__(self, filenames, encoding):
+        if not isinstance(filenames, list):
+            filenames = [filenames]
+
+        self.file = SplitFile.from_paths(filenames, "rb")
+
+        self._filenames = filenames
         self._enc = encoding
-        # open the file as a binary file
-        self.file = open(filename, "rb")
         # retrieve the header fields
         try:
             self.header_fields = HeaderBlock(self._enc).unpack_from_file(self.file)
@@ -519,8 +524,12 @@ class ZIMFile:
         except struct_error:
             raise ZIMFileUnpackError
     
+    @property
+    def base_filename(self):
+        return self._filenames[0]
+
     def copy(self):
-        return ZIMFile(self._filename, self._enc)
+        return ZIMFile(self._filenames, self._enc)
 
     def checksum(self, extra_fields=None):
         # create a checksum to uniquely identify this zim file
@@ -1135,9 +1144,9 @@ class XapianIndex(SearchIndex):
 
 
 class ZIMClient:
-    def __init__(self, zim_filename, encoding="utf-8", index_file=None, auto_delete=False, enable_search=True):
+    def __init__(self, zim_filenames, encoding="utf-8", index_file=None, auto_delete=False, enable_search=True):
         """ Create a new ZIM client to easily access the provided ZIM file.
-        :param zim_filename: the path to the file to open as a ZIM file.
+        :param zim_filenames: the path to the file to open as a ZIM file, or a list of paths.
         :param encoding: the encoding used in the ZIM file which is usually UTF-8 - this is not verified for you!
         :param index_file: the location of where to create an index file if relying on SQLite FTS search.
                            At this location a file *.idx and a file *.chk will be created.
@@ -1146,16 +1155,19 @@ class ZIMClient:
                             option the incorrect index will be deleted and recreated instead.
         :param enable_search: set to False to disable ZIMClient's search functionality.
         :raises:
-            ZIMClientNoFile: if zim_filename is recognised as a path to a file.
+            ZIMClientNoFile: if zim_filename is not recognised as a path to a file.
             ZIMClientInvalidFile: if the file at zim_filename could not be successfully opened as a ZIM file.
         """
 
-        if not os.path.isfile(zim_filename):
+        if not isinstance(zim_filenames, list):
+            zim_filenames = [zim_filenames]
+
+        if not all(map(os.path.isfile, zim_filenames)):
             raise ZIMClientNoFile
 
         try:
             # create the object to access the ZIM file
-            self._zim_file = ZIMFile(zim_filename, encoding)
+            self._zim_file = ZIMFile(zim_filenames, encoding)
         except ZIMFileUnpackError:
             raise ZIMClientInvalidFile
 
@@ -1168,10 +1180,10 @@ class ZIMClient:
                      self.language + " (ISO639-1), articles: " + str(len(self._zim_file)))
 
         if not index_file:
-            base = os.path.basename(zim_filename)
+            base = os.path.basename(self._zim_file.base_filename)
             name = os.path.splitext(base)[0]
             # name the index file the same as the zim file with a different extension
-            index_file = os.path.join(os.path.dirname(zim_filename), name + ".idx")
+            index_file = os.path.join(os.path.dirname(self._zim_file.base_filename), name + ".idx")
         logging.info("The index file is determined to be located at " + str(index_file) + ".")
 
         # set this object to a class variable of ZIMRequestHandler
@@ -1209,7 +1221,7 @@ class ZIMClient:
             if xapian_offset is not None:
                 alt_offset = xapian_offset
 
-        return XapianIndex(db_offset, self.language, zim_file._enc, zim_file._filename, zim_file.version, alt_offset)
+        return XapianIndex(db_offset, self.language, zim_file._enc, zim_file.base_filename, zim_file.version, alt_offset)
 
     def __create_search_indexer_thread(self, zim_file, index_file, **kwargs):
         result = Queue()
