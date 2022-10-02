@@ -8,7 +8,7 @@ Once you have Python 3 up and running, the easiest way to install **ZIMply** is 
 
 .. code:: bash
 
-    pip install zimply
+    pip install zstandard zimply
 
 When you have both Python 2.* and Python 3.* installed on your system, you may need to replace `pip` with `pip3` depending on your setup. All you need to do then is download a ZIM file from `this site <https://www.mirrorservice.org/sites/download.kiwix.org/zim/wikipedia/>`__ and use a command such as:
 
