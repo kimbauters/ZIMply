@@ -783,7 +783,7 @@ class ZIMRequestHandler:
 
                 cursor = ZIMRequestHandler.reverse_index.cursor()
                 search_for = "* ".join(keywords) + "*"
-                cursor.execute("SELECT docid FROM papers WHERE title MATCH ?",
+                cursor.execute("SELECT rowid FROM papers WHERE title MATCH ?",
                                [search_for])
 
                 results = cursor.fetchall()
@@ -886,16 +886,16 @@ class ZIMServer:
             cursor = db.cursor()
             # limit memory usage to 64MB
             cursor.execute("PRAGMA CACHE_SIZE = -65536")
-            # create a contentless virtual table using full-text search (FTS4)
+            # create a contentless virtual table using full-text search (FTS5)
             # and the porter tokeniser
             cursor.execute("CREATE VIRTUAL TABLE papers "
-                           "USING fts4(content='', title, tokenize=porter);")
+                           "USING fts5(content='', title, tokenize=porter);")
             # get an iterator to access all the articles
             articles = iter(self._zim_file)
 
             for url, title, idx in articles:  # retrieve articles one by one
                 cursor.execute(
-                    "INSERT INTO papers(docid, title) VALUES (?, ?)",
+                    "INSERT INTO papers(rowid, title) VALUES (?, ?)",
                     (idx, title))  # and add them
             # once all articles are added, commit the changes to the database
             db.commit()
